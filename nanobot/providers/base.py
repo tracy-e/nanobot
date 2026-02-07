@@ -67,3 +67,12 @@ class LLMProvider(ABC):
     def get_default_model(self) -> str:
         """Get the default model for this provider."""
         pass
+
+    def set_session_key(self, key: str) -> None:
+        """Set the current session key for multi-turn conversation tracking.
+
+        Providers that support session-based multi-turn conversations
+        (e.g. ClaudeCodeProvider) should override this method.
+        The default implementation is a no-op.
+        """
+        pass

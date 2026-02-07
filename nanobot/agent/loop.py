@@ -190,13 +190,16 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
+            # Set session context for multi-turn conversation tracking
+            self.provider.set_session_key(msg.session_key)
+
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
-            
+
             # Handle tool calls
             if response.has_tool_calls:
                 # Add assistant message with tool calls
@@ -297,12 +300,15 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
             
+            # Set session context for multi-turn conversation tracking
+            self.provider.set_session_key(session_key)
+
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
-            
+
             if response.has_tool_calls:
                 tool_call_dicts = [
                     {
@@ -318,7 +324,7 @@ class AgentLoop:
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts
                 )
-                
+
                 for tool_call in response.tool_calls:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
@@ -329,7 +335,7 @@ class AgentLoop:
             else:
                 final_content = response.content
                 break
-        
+
         if final_content is None:
             final_content = "Background task completed."
         

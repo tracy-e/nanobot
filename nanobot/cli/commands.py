@@ -165,6 +165,116 @@ def _make_provider(config):
 
 
 # ============================================================================
+# Provider Builder
+# ============================================================================
+
+
+def _resolve_provider_config(
+    model: str, config: "Config",
+) -> tuple[str | None, str | None]:
+    """Resolve API key and base URL for a model from config.
+
+    Matches model names against known provider prefixes/keywords.
+    Falls back to the vLLM/local provider when no match is found.
+
+    Args:
+        model: The model identifier (e.g. ``"openrouter/anthropic/claude-sonnet-4"``).
+        config: The loaded nanobot configuration.
+
+    Returns:
+        (api_key, api_base) tuple.
+    """
+    p = config.providers
+    model_lower = model.lower()
+
+    # Prefix-based matching (most specific first)
+    if model_lower.startswith("openrouter/"):
+        return p.openrouter.api_key or None, p.openrouter.api_base or "https://openrouter.ai/api/v1"
+    if model_lower.startswith("bedrock/"):
+        return None, None  # Bedrock uses AWS credentials, not api_key
+
+    # Keyword-based matching
+    _keyword_provider_map: list[tuple[list[str], "ProviderConfig"]] = [
+        (["deepseek"], p.deepseek),
+        (["anthropic", "claude"], p.anthropic),
+        (["gpt", "openai"], p.openai),
+        (["gemini"], p.gemini),
+        (["groq"], p.groq),
+        (["glm", "zhipu", "chatglm"], p.zhipu),
+        (["kimi", "moonshot"], p.vllm),
+    ]
+    for keywords, prov in _keyword_provider_map:
+        if any(kw in model_lower for kw in keywords):
+            return prov.api_key or None, prov.api_base
+
+    # Default: vllm / local endpoint
+    return p.vllm.api_key or None, p.vllm.api_base
+
+
+def _build_single_provider(model: str, config: "Config") -> "LLMProvider":
+    """Build a single LLM provider from a model string.
+
+    Args:
+        model: Model identifier. Prefix ``"claude-code/"`` selects
+               :class:`ClaudeCodeProvider`; all others use :class:`LiteLLMProvider`.
+        config: The loaded nanobot configuration.
+
+    Returns:
+        An initialized :class:`LLMProvider` instance.
+
+    Raises:
+        ValueError: If no API key is available for the requested model.
+    """
+    if model.startswith("claude-code/"):
+        from nanobot.providers.claude_code_provider import ClaudeCodeProvider
+        claude_model = model.split("/", 1)[1]
+        return ClaudeCodeProvider(workspace=config.workspace_path, model=claude_model)
+
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+    api_key, api_base = _resolve_provider_config(model, config)
+    is_bedrock = model.startswith("bedrock/")
+    if not api_key and not is_bedrock:
+        raise ValueError(f"No API key configured for model '{model}'")
+    return LiteLLMProvider(api_key=api_key, api_base=api_base, default_model=model)
+
+
+def _build_provider_chain(config: "Config") -> "LLMProvider":
+    """Build a provider (or fallback chain) from config.
+
+    Uses ``config.agents.defaults.model`` as the primary provider and
+    ``config.agents.defaults.fallback_models`` as ordered fallback list.
+
+    Returns a single provider when no fallbacks are configured, or a
+    :class:`FallbackProvider` wrapping the full chain.
+    """
+    primary_model = config.agents.defaults.model
+    fallback_models = config.agents.defaults.fallback_models or []
+
+    all_models = [primary_model] + fallback_models
+
+    # Build all providers, skip ones that fail to construct
+    chain: list[tuple[str, "LLMProvider"]] = []
+    for model in all_models:
+        try:
+            provider = _build_single_provider(model, config)
+            chain.append((model, provider))
+            console.print(f"[green]✓[/green] Provider: {model}")
+        except Exception as e:
+            console.print(f"[yellow]⚠[/yellow] Provider {model} unavailable: {e}")
+
+    if not chain:
+        console.print("[red]Error: No providers available.[/red]")
+        raise typer.Exit(1)
+
+    if len(chain) == 1:
+        return chain[0][1]
+
+    from nanobot.providers.fallback_provider import FallbackProvider
+    console.print(f"[green]✓[/green] Fallback chain: {' → '.join(m for m, _ in chain)}")
+    return FallbackProvider(chain)
+
+
+# ============================================================================
 # Gateway / Server
 # ============================================================================
 
@@ -182,17 +292,21 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    
+
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-    
+
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
-    
+
     config = load_config()
+
+    # Create components
     bus = MessageBus()
-    provider = _make_provider(config)
-    
+
+    # Create provider (with fallback chain if configured)
+    provider = _build_provider_chain(config)
+
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
@@ -289,11 +403,10 @@ def agent(
     from nanobot.config.loader import load_config
     from nanobot.bus.queue import MessageBus
     from nanobot.agent.loop import AgentLoop
-    
+
     config = load_config()
-    
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider = _build_provider_chain(config)
     
     agent_loop = AgentLoop(
         bus=bus,

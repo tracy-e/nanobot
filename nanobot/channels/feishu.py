@@ -150,6 +150,7 @@ class FeishuChannel(BaseChannel):
         Add a reaction emoji to a message (non-blocking).
         
         Common emoji types: THUMBSUP, OK, EYES, DONE, OnIt, HEART
+        https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
         """
         if not self._client or not Emoji:
             return
@@ -276,7 +277,7 @@ class FeishuChannel(BaseChannel):
             msg_type = message.message_type
             
             # Add reaction to indicate "seen"
-            await self._add_reaction(message_id, "THUMBSUP")
+            await self._add_reaction(message_id, "Get")
             
             # Parse message content
             if msg_type == "text":

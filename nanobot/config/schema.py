@@ -51,6 +51,10 @@ class AgentDefaults(BaseModel):
     """Default agent configuration."""
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    fallback_models: list[str] = Field(
+        default_factory=list,
+        description="Ordered list of fallback model names tried when the primary model fails.",
+    )
     max_tokens: int = 8192
     temperature: float = 0.7
     max_tool_iterations: int = 20

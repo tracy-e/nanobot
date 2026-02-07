@@ -18,8 +18,8 @@ class LiteLLMProvider(LLMProvider):
     """
     
     def __init__(
-        self, 
-        api_key: str | None = None, 
+        self,
+        api_key: str | None = None,
         api_base: str | None = None,
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
@@ -27,23 +27,29 @@ class LiteLLMProvider(LLMProvider):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
-        
-        # Detect OpenRouter by api_key prefix or explicit api_base
+
+        # Detect OpenRouter by api_key prefix, api_base, or model prefix
         self.is_openrouter = (
             (api_key and api_key.startswith("sk-or-")) or
-            (api_base and "openrouter" in api_base)
+            (api_base and "openrouter" in api_base) or
+            default_model.startswith("openrouter/")
         )
-        
+
         # Detect AiHubMix by api_base
         self.is_aihubmix = bool(api_base and "aihubmix" in api_base)
-        
+
         # Track if using custom endpoint (vLLM, etc.)
         self.is_vllm = bool(api_base) and not self.is_openrouter and not self.is_aihubmix
-        
-        # Configure LiteLLM based on provider
+
+        # Store per-instance credentials (avoid clobbering globals in multi-provider chains)
+        self._api_key = api_key
+        self._api_base = api_base
+
+        # Configure LiteLLM env vars based on provider
+        # NOTE: env vars are global — in a fallback chain the last provider wins.
+        # We pass api_key/api_base per-call in chat() to avoid this issue.
         if api_key:
             if self.is_openrouter:
-                # OpenRouter mode - set key
                 os.environ["OPENROUTER_API_KEY"] = api_key
             elif self.is_aihubmix:
                 # AiHubMix gateway - OpenAI-compatible
@@ -69,10 +75,10 @@ class LiteLLMProvider(LLMProvider):
             elif "moonshot" in default_model or "kimi" in default_model:
                 os.environ.setdefault("MOONSHOT_API_KEY", api_key)
                 os.environ.setdefault("MOONSHOT_API_BASE", api_base or "https://api.moonshot.cn/v1")
-        
-        if api_base:
-            litellm.api_base = api_base
-        
+
+        # Don't set litellm.api_base globally — it clobbers other providers
+        # in a fallback chain. Instead, pass api_base per-call in kwargs.
+
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
     
@@ -131,10 +137,17 @@ class LiteLLMProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        
-        # Pass api_base directly for custom endpoints (vLLM, etc.)
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
+
+        # Pass api_base per-call (not globally) to avoid clobbering in fallback chains
+        if self._api_base:
+            kwargs["api_base"] = self._api_base
+
+        # Pass api_key per-call for providers that need it
+        if self._api_key:
+            if self.is_openrouter:
+                kwargs["api_key"] = self._api_key
+            elif self.is_vllm:
+                kwargs["api_key"] = self._api_key
         
         # Pass extra headers (e.g. APP-Code for AiHubMix)
         if self.extra_headers:
