@@ -265,10 +265,16 @@ def _make_provider(config: Config):
     from nanobot.providers.base import GenerationSettings
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
+    from nanobot.providers.claude_oauth_provider import ClaudeOAuthProvider
 
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
+
+    # Claude OAuth provider: reuse Claude Code OAuth token for Anthropic API
+    if model.startswith("claude-oauth/"):
+        claude_model = model.split("/", 1)[1]
+        return ClaudeOAuthProvider(model=claude_model)
 
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
@@ -316,8 +322,6 @@ def _make_provider(config: Config):
         reasoning_effort=defaults.reasoning_effort,
     )
     return provider
-
-
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import load_config, set_config_path
