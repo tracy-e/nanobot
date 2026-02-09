@@ -296,10 +296,23 @@ This file stores important information that should persist across sessions.
 
 
 def _make_provider(config):
-    """Create LiteLLMProvider from config. Exits if no API key found."""
+    """Create an LLM provider from config. Supports claude-code/ and LiteLLM."""
+    model = config.agents.defaults.model
+
+    # Claude Code CLI provider: model = "claude-code/opus" etc.
+    if model.startswith("claude-code/"):
+        from nanobot.providers.claude_code_provider import ClaudeCodeProvider
+        claude_model = model.split("/", 1)[1]
+        return ClaudeCodeProvider(workspace=config.workspace_path, model=claude_model)
+
+    # Claude OAuth provider: model = "claude-oauth/claude-sonnet-4-5-20250929" etc.
+    if model.startswith("claude-oauth/"):
+        from nanobot.providers.claude_oauth_provider import ClaudeOAuthProvider
+        claude_model = model.split("/", 1)[1]
+        return ClaudeOAuthProvider(model=claude_model)
+
     from nanobot.providers.litellm_provider import LiteLLMProvider
     p = config.get_provider()
-    model = config.agents.defaults.model
     if not (p and p.api_key) and not model.startswith("bedrock/"):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
