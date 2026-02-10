@@ -171,10 +171,14 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        
+
         if not images:
             return text
-        return images + [{"type": "text", "text": text}]
+        content_blocks = []
+        if text:
+            content_blocks.append({"type": "text", "text": text})
+        content_blocks.extend(images)
+        return content_blocks
     
     def add_tool_result(
         self,
