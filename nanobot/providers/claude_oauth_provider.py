@@ -221,10 +221,34 @@ class ClaudeOAuthProvider(LLMProvider):
 
     @staticmethod
     def _normalize_content(content: Any) -> str | list[dict[str, Any]]:
-        """Keep content as-is if it's a list (multimodal), otherwise ensure str."""
+        """Normalize content, converting OpenAI image_url blocks to Anthropic format."""
         if isinstance(content, list):
-            return content
+            return [ClaudeOAuthProvider._convert_content_block(b) for b in content]
         return str(content) if content else ""
+
+    @staticmethod
+    def _convert_content_block(block: dict[str, Any]) -> dict[str, Any]:
+        """Convert a single OpenAI content block to Anthropic format."""
+        if block.get("type") != "image_url":
+            return block
+        url = block.get("image_url", {}).get("url", "")
+        # Handle data URI: data:<media_type>;base64,<data>
+        if url.startswith("data:") and ";base64," in url:
+            header, data = url.split(";base64,", 1)
+            media_type = header.removeprefix("data:")
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
+            }
+        # Handle regular URL
+        return {
+            "type": "image",
+            "source": {"type": "url", "url": url},
+        }
 
     @staticmethod
     def _merge_consecutive_roles(
