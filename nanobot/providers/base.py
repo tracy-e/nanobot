@@ -68,3 +68,7 @@ class LLMProvider(ABC):
     def get_default_model(self) -> str:
         """Get the default model for this provider."""
         pass
+
+    def set_session_key(self, key: str) -> None:
+        """Set the current session key. Override in providers that need it."""
+        pass

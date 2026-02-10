@@ -190,14 +190,17 @@ class AgentLoop:
         
         while iteration < self.max_iterations:
             iteration += 1
-            
+
+            # Set session context for multi-turn conversation tracking
+            self.provider.set_session_key(msg.session_key)
+
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
-            
+
             # Handle tool calls
             if response.has_tool_calls:
                 # Add assistant message with tool calls
@@ -230,9 +233,9 @@ class AgentLoop:
                 final_content = response.content
                 break
         
-        if final_content is None:
-            final_content = "I've completed processing but have no response to give."
-        
+        if not final_content or not final_content.strip():
+            final_content = "处理完成。"
+
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
@@ -299,13 +302,16 @@ class AgentLoop:
         
         while iteration < self.max_iterations:
             iteration += 1
-            
+
+            # Set session context for multi-turn conversation tracking
+            self.provider.set_session_key(session_key)
+
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
             )
-            
+
             if response.has_tool_calls:
                 tool_call_dicts = [
                     {
@@ -334,8 +340,8 @@ class AgentLoop:
                 final_content = response.content
                 break
         
-        if final_content is None:
-            final_content = "Background task completed."
+        if not final_content or not final_content.strip():
+            final_content = "后台任务已完成。"
         
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
