@@ -1,39 +1,70 @@
-"""Claude OAuth provider — calls Anthropic Messages API with OAuth token."""
+"""Claude OAuth provider — uses LiteLLM with OAuth token from macOS Keychain."""
 
-import logging
+import json
+import time
 from typing import Any
 
-import httpx
+import litellm
+from litellm import acompletion
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-from nanobot.providers.claude_oauth_auth import get_claude_oauth_token
+from nanobot.providers.claude_oauth_auth import (
+    get_claude_oauth_credentials,
+    get_claude_oauth_token,
+    trigger_claude_token_refresh,
+)
 
-logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Patch LiteLLM: Anthropic OAuth requires "Authorization: Bearer" but NOT
+# "x-api-key". LiteLLM always adds x-api-key which Anthropic rejects for
+# OAuth tokens. This patch lets callers remove headers by setting them to
+# None in extra_headers.
+# ---------------------------------------------------------------------------
+from litellm.llms.anthropic.chat.transformation import (
+    AnthropicConfig as _AntConfig,
+)
+
+_orig_validate_env = _AntConfig.validate_environment
+
+
+def _patched_validate_env(self, headers, *args, **kwargs):
+    caller_overrides = dict(headers) if headers else {}
+    result = _orig_validate_env(self, headers, *args, **kwargs)
+    # Re-apply caller headers so they take priority over Anthropic defaults
+    result.update(caller_overrides)
+    # Remove headers explicitly set to None (delete unwanted defaults)
+    for key in [k for k, v in result.items() if v is None]:
+        del result[key]
+    return result
+
+
+_AntConfig.validate_environment = _patched_validate_env
 
 
 class ClaudeOAuthProvider(LLMProvider):
-    """LLM provider that uses Claude Code's OAuth token to call the Anthropic API.
+    """LLM provider that uses Claude Code's OAuth token via LiteLLM.
 
     Reads the OAuth token from macOS Keychain (stored by Claude Code),
-    converts between OpenAI-style messages/tools and Anthropic format,
-    and calls the Messages API directly.
+    injects the required system prefix and auth headers, and delegates
+    the actual API call to LiteLLM.
     """
 
-    API_URL = "https://api.anthropic.com/v1/messages"
     REQUIRED_SYSTEM_PREFIX = (
         "You are Claude Code, Anthropic's official CLI for Claude."
     )
     BETA_HEADER = (
         "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
     )
-    API_VERSION = "2023-06-01"
 
-    # Tool names that the OAuth API rejects — map to CamelCase alternatives.
+    # Refresh 5 minutes before expiry to avoid mid-request failures.
+    _REFRESH_MARGIN_MS = 5 * 60 * 1000
+
+    # Tool names that the OAuth API rejects (lowercase names matching Claude
+    # Code's internal tools). Map them to CamelCase alternatives.
     _TOOL_NAME_MAP: dict[str, str] = {
         "read_file": "ReadFile",
-        "write_file": "WriteFile",
-        "list_dir": "ListDir",
-        "exec": "Execute",
     }
     _TOOL_NAME_RMAP: dict[str, str] = {v: k for k, v in _TOOL_NAME_MAP.items()}
 
@@ -41,7 +72,9 @@ class ClaudeOAuthProvider(LLMProvider):
         super().__init__()
         self.model = model
         self._token: str | None = None
-        self._client = httpx.AsyncClient(timeout=300.0)
+        self._expires_at: int | None = None
+        litellm.suppress_debug_info = True
+        litellm.drop_params = True
 
     # ------------------------------------------------------------------
     # Public interface
@@ -56,43 +89,53 @@ class ClaudeOAuthProvider(LLMProvider):
         temperature: float = 0.7,
     ) -> LLMResponse:
         token = self._get_token()
-        system_blocks, anthropic_messages = self._convert_messages(messages)
-        anthropic_tools = self._convert_tools(tools) if tools else None
 
         # Strip provider prefix (e.g. "claude-oauth/claude-sonnet-..." → "claude-sonnet-...")
         resolved_model = model or self.model
         if "/" in resolved_model:
             resolved_model = resolved_model.split("/", 1)[1]
 
-        body: dict[str, Any] = {
-            "model": resolved_model,
+        # Ensure the Claude Code system prefix is present
+        messages = self._ensure_system_prefix(messages)
+
+        kwargs: dict[str, Any] = {
+            "model": f"anthropic/{resolved_model}",
+            "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "system": system_blocks,
-            "messages": anthropic_messages,
+            # Anthropic OAuth requires Authorization: Bearer, not x-api-key.
+            # LiteLLM detects OAuth tokens via lowercase "authorization" header
+            # and auto-adds unwanted headers. We override/remove them:
+            # - x-api-key=None: removed (OAuth doesn't use x-api-key)
+            # - anthropic-dangerous-direct-browser-access=None: removed
+            #   (browser flag triggers Claude Code restriction)
+            # - anthropic-beta: our Claude Code beta flags
+            "api_key": "oauth-via-header",
+            "extra_headers": {
+                "authorization": f"Bearer {token}",
+                "anthropic-beta": self.BETA_HEADER,
+                "x-api-key": None,
+                "anthropic-dangerous-direct-browser-access": None,
+            },
         }
-        if anthropic_tools:
-            body["tools"] = anthropic_tools
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "anthropic-version": self.API_VERSION,
-            "anthropic-beta": self.BETA_HEADER,
-            "content-type": "application/json",
-        }
+        if tools:
+            kwargs["tools"] = self._remap_tools(tools)
+            kwargs["tool_choice"] = "auto"
 
-        resp = await self._client.post(self.API_URL, json=body, headers=headers)
-
-        # 401 → refresh token once and retry
-        if resp.status_code == 401:
-            logger.info("OAuth token expired, refreshing…")
+        try:
+            response = await acompletion(**kwargs)
+            return self._parse_response(response)
+        except litellm.AuthenticationError:
+            # 401 → trigger Claude Code to refresh token, then retry
+            logger.info("OAuth token rejected (401), triggering refresh…")
             self._token = None
+            self._expires_at = None
+            trigger_claude_token_refresh()
             token = self._get_token()
-            headers["Authorization"] = f"Bearer {token}"
-            resp = await self._client.post(self.API_URL, json=body, headers=headers)
-
-        resp.raise_for_status()
-        return self._parse_response(resp.json())
+            kwargs["extra_headers"]["authorization"] = f"Bearer {token}"
+            response = await acompletion(**kwargs)
+            return self._parse_response(response)
 
     def get_default_model(self) -> str:
         return f"claude-oauth/{self.model}"
@@ -102,8 +145,40 @@ class ClaudeOAuthProvider(LLMProvider):
     # ------------------------------------------------------------------
 
     def _get_token(self) -> str:
-        if not self._token:
-            self._token = get_claude_oauth_token()
+        now_ms = int(time.time() * 1000)
+
+        # Check if cached token is still valid (with margin)
+        if self._token and self._expires_at:
+            if now_ms < self._expires_at - self._REFRESH_MARGIN_MS:
+                return self._token
+
+        # Read full credentials from Keychain
+        creds = get_claude_oauth_credentials()
+        if creds:
+            expires_at = creds.get("expiresAt")
+            needs_refresh = (
+                expires_at is not None
+                and now_ms >= expires_at - self._REFRESH_MARGIN_MS
+            )
+
+            if needs_refresh:
+                # Trigger Claude Code to refresh, then re-read
+                logger.info("Token expiring soon, triggering Claude Code refresh…")
+                if trigger_claude_token_refresh():
+                    creds = get_claude_oauth_credentials()
+                    if creds and creds.get("accessToken"):
+                        self._token = creds["accessToken"]
+                        self._expires_at = creds.get("expiresAt")
+                        return self._token
+
+            # Token not expired (or refresh didn't help, use what we have)
+            if creds.get("accessToken"):
+                self._token = creds["accessToken"]
+                self._expires_at = expires_at
+                return self._token
+
+        # Fallback: original simple token read
+        self._token = get_claude_oauth_token()
         if not self._token:
             raise RuntimeError(
                 "No Claude OAuth token found. "
@@ -112,231 +187,78 @@ class ClaudeOAuthProvider(LLMProvider):
         return self._token
 
     # ------------------------------------------------------------------
-    # Format conversion: OpenAI → Anthropic
+    # Message preparation
     # ------------------------------------------------------------------
 
-    def _convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Convert OpenAI tool definitions to Anthropic format."""
-        result = []
-        for tool in tools:
-            fn = tool.get("function", tool)
-            name = self._map_tool_name(fn["name"])
-            result.append({
-                "name": name,
-                "description": fn.get("description", ""),
-                "input_schema": fn.get("parameters", {"type": "object"}),
-            })
-        return result
-
-    def _convert_messages(
+    def _ensure_system_prefix(
         self, messages: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Convert OpenAI messages to (system_blocks, anthropic_messages).
-
-        - Extracts role=system messages into content block array.
-        - The Claude Code system prefix is always the first block.
-        - Converts assistant tool_calls to content blocks with type=tool_use.
-        - Converts role=tool messages to user messages with type=tool_result.
-        """
-        system_parts: list[str] = []
-        anthropic_msgs: list[dict[str, Any]] = []
-
-        for msg in messages:
-            role = msg.get("role", "")
-
-            if role == "system":
-                system_parts.append(msg.get("content", ""))
-                continue
-
-            if role == "user":
-                anthropic_msgs.append({
-                    "role": "user",
-                    "content": self._normalize_content(msg.get("content", "")),
-                })
-                continue
-
-            if role == "assistant":
-                content_blocks: list[dict[str, Any]] = []
-                text = msg.get("content")
-                if text:
-                    content_blocks.append({"type": "text", "text": text})
-                for tc in msg.get("tool_calls", []):
-                    fn = tc.get("function", {})
-                    arguments = fn.get("arguments", {})
-                    # arguments may be a JSON string
-                    if isinstance(arguments, str):
-                        import json
-                        try:
-                            arguments = json.loads(arguments)
-                        except (json.JSONDecodeError, ValueError):
-                            arguments = {"raw": arguments}
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc.get("id", ""),
-                        "name": self._map_tool_name(fn.get("name", "")),
-                        "input": arguments,
-                    })
-                if content_blocks:
-                    anthropic_msgs.append({
-                        "role": "assistant",
-                        "content": content_blocks,
-                    })
-                continue
-
-            if role == "tool":
-                # Anthropic expects tool_result inside a user message
-                tool_result_block = {
-                    "type": "tool_result",
-                    "tool_use_id": msg.get("tool_call_id", ""),
-                    "content": msg.get("content", ""),
-                }
-                # Merge into previous user message if possible
-                if (
-                    anthropic_msgs
-                    and anthropic_msgs[-1]["role"] == "user"
-                    and isinstance(anthropic_msgs[-1]["content"], list)
-                ):
-                    anthropic_msgs[-1]["content"].append(tool_result_block)
-                else:
-                    anthropic_msgs.append({
-                        "role": "user",
-                        "content": [tool_result_block],
-                    })
-                continue
-
-        # Build system as array of content blocks.
-        # The Claude Code prefix must be the first block (OAuth requirement).
-        system_blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": self.REQUIRED_SYSTEM_PREFIX}
-        ]
-        for part in system_parts:
-            if part and not part.startswith(self.REQUIRED_SYSTEM_PREFIX):
-                system_blocks.append({"type": "text", "text": part})
-
-        # Ensure messages alternate user/assistant (Anthropic requirement).
-        # Merge consecutive same-role messages.
-        anthropic_msgs = self._merge_consecutive_roles(anthropic_msgs)
-
-        return system_blocks, anthropic_msgs
-
-    @staticmethod
-    def _normalize_content(content: Any) -> str | list[dict[str, Any]]:
-        """Normalize content, converting OpenAI image_url blocks to Anthropic format."""
-        if isinstance(content, list):
-            return [ClaudeOAuthProvider._convert_content_block(b) for b in content]
-        return str(content) if content else ""
-
-    @staticmethod
-    def _convert_content_block(block: dict[str, Any]) -> dict[str, Any]:
-        """Convert a single OpenAI content block to Anthropic format."""
-        if block.get("type") != "image_url":
-            return block
-        url = block.get("image_url", {}).get("url", "")
-        # Handle data URI: data:<media_type>;base64,<data>
-        if url.startswith("data:") and ";base64," in url:
-            header, data = url.split(";base64,", 1)
-            media_type = header.removeprefix("data:")
-            return {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": data,
-                },
-            }
-        # Handle regular URL
-        return {
-            "type": "image",
-            "source": {"type": "url", "url": url},
-        }
-
-    @staticmethod
-    def _merge_consecutive_roles(
-        msgs: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Merge consecutive messages with the same role."""
-        if not msgs:
-            return msgs
-        merged: list[dict[str, Any]] = [msgs[0]]
-        for msg in msgs[1:]:
-            if msg["role"] == merged[-1]["role"]:
-                # Merge content
-                prev = merged[-1]["content"]
-                curr = msg["content"]
-                if isinstance(prev, str) and isinstance(curr, str):
-                    merged[-1]["content"] = f"{prev}\n\n{curr}"
-                else:
-                    # Convert to list and extend
-                    if isinstance(prev, str):
-                        prev = [{"type": "text", "text": prev}]
-                    if isinstance(curr, str):
-                        curr = [{"type": "text", "text": curr}]
-                    merged[-1]["content"] = prev + curr
-            else:
-                merged.append(msg)
-        return merged
+        """Ensure the Claude Code system prefix is present in messages."""
+        # Check if any system message already starts with the prefix
+        for msg in messages:
+            if msg.get("role") == "system":
+                content = msg.get("content", "")
+                if content.startswith(self.REQUIRED_SYSTEM_PREFIX):
+                    return messages
 
-    # ------------------------------------------------------------------
-    # Response parsing: Anthropic → LLMResponse
-    # ------------------------------------------------------------------
-
-    def _parse_response(self, data: dict[str, Any]) -> LLMResponse:
-        """Parse Anthropic Messages API response into LLMResponse."""
-        content_parts: list[str] = []
-        tool_calls: list[ToolCallRequest] = []
-        reasoning_parts: list[str] = []
-
-        for block in data.get("content", []):
-            block_type = block.get("type")
-            if block_type == "text":
-                content_parts.append(block.get("text", ""))
-            elif block_type == "tool_use":
-                tool_calls.append(ToolCallRequest(
-                    id=block.get("id", ""),
-                    name=self._unmap_tool_name(block.get("name", "")),
-                    arguments=block.get("input", {}),
-                ))
-            elif block_type == "thinking":
-                reasoning_parts.append(block.get("thinking", ""))
-
-        usage_data = data.get("usage", {})
-        usage = {
-            "prompt_tokens": usage_data.get("input_tokens", 0),
-            "completion_tokens": usage_data.get("output_tokens", 0),
-            "total_tokens": (
-                usage_data.get("input_tokens", 0)
-                + usage_data.get("output_tokens", 0)
-            ),
-        }
-
-        finish_reason = data.get("stop_reason", "end_turn")
-        # Map Anthropic stop reasons to OpenAI equivalents
-        reason_map = {
-            "end_turn": "stop",
-            "tool_use": "tool_calls",
-            "max_tokens": "length",
-            "stop_sequence": "stop",
-        }
-        finish_reason = reason_map.get(finish_reason, finish_reason)
-
-        return LLMResponse(
-            content="\n\n".join(content_parts) if content_parts else None,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            usage=usage,
-            reasoning_content=(
-                "\n\n".join(reasoning_parts) if reasoning_parts else None
-            ),
-        )
+        # Prepend a system message with the required prefix
+        prefix_msg = {"role": "system", "content": self.REQUIRED_SYSTEM_PREFIX}
+        return [prefix_msg] + list(messages)
 
     # ------------------------------------------------------------------
     # Tool name mapping
     # ------------------------------------------------------------------
 
-    def _map_tool_name(self, name: str) -> str:
-        """Map nanobot tool name to Anthropic-safe name."""
-        return self._TOOL_NAME_MAP.get(name, name)
+    def _remap_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Rename tools that clash with Claude Code's internal tool names."""
+        remapped = []
+        for tool in tools:
+            fn = tool.get("function", {})
+            name = fn.get("name", "")
+            mapped = self._TOOL_NAME_MAP.get(name)
+            if mapped:
+                tool = {**tool, "function": {**fn, "name": mapped}}
+            remapped.append(tool)
+        return remapped
 
-    def _unmap_tool_name(self, name: str) -> str:
-        """Map Anthropic tool name back to nanobot tool name."""
-        return self._TOOL_NAME_RMAP.get(name, name)
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
+
+    def _parse_response(self, response: Any) -> LLMResponse:
+        """Parse LiteLLM response into LLMResponse."""
+        choice = response.choices[0]
+        message = choice.message
+
+        tool_calls = []
+        if hasattr(message, "tool_calls") and message.tool_calls:
+            for tc in message.tool_calls:
+                args = tc.function.arguments
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"raw": args}
+                tool_calls.append(ToolCallRequest(
+                    id=tc.id,
+                    name=self._TOOL_NAME_RMAP.get(tc.function.name, tc.function.name),
+                    arguments=args,
+                ))
+
+        usage = {}
+        if hasattr(response, "usage") and response.usage:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+
+        reasoning_content = getattr(message, "reasoning_content", None)
+
+        return LLMResponse(
+            content=message.content,
+            tool_calls=tool_calls,
+            finish_reason=choice.finish_reason or "stop",
+            usage=usage,
+            reasoning_content=reasoning_content,
+        )
