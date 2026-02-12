@@ -87,23 +87,44 @@ class MemoryStore:
         files = list(self.memory_dir.glob("????-??-??.md"))
         return sorted(files, reverse=True)
     
+    def _read_yesterday(self) -> str:
+        """Read yesterday's memory notes."""
+        from datetime import timedelta
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        yesterday_file = self.memory_dir / f"{yesterday}.md"
+        if yesterday_file.exists():
+            return yesterday_file.read_text(encoding="utf-8")
+        return ""
+
+    def list_all_memory_files(self) -> list[str]:
+        """List all .md file names in memory/ directory, newest first."""
+        if not self.memory_dir.exists():
+            return []
+        files = sorted(self.memory_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        return [f.name for f in files]
+
     def get_memory_context(self) -> str:
         """
         Get memory context for the agent.
-        
+
         Returns:
             Formatted memory context including long-term and recent memories.
         """
         parts = []
-        
+
         # Long-term memory
         long_term = self.read_long_term()
         if long_term:
             parts.append("## Long-term Memory\n" + long_term)
-        
+
         # Today's notes
         today = self.read_today()
         if today:
             parts.append("## Today's Notes\n" + today)
-        
+
+        # Yesterday's notes
+        yesterday = self._read_yesterday()
+        if yesterday:
+            parts.append("## Yesterday's Notes\n" + yesterday)
+
         return "\n\n".join(parts) if parts else ""

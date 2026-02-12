@@ -51,15 +51,20 @@ class SpawnTool(Tool):
                     "type": "string",
                     "description": "Optional short label for the task (for display)",
                 },
+                "report_progress": {
+                    "type": "boolean",
+                    "description": "Whether to send step-by-step progress messages to the user (default: false)",
+                },
             },
             "required": ["task"],
         }
-    
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+
+    async def execute(self, task: str, label: str | None = None, report_progress: bool = False, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
         return await self._manager.spawn(
             task=task,
             label=label,
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
+            report_progress=report_progress,
         )
