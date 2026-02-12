@@ -54,6 +54,7 @@ class SubagentManager:
         label: str | None = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
+        report_progress: bool = False,
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
@@ -77,7 +78,7 @@ class SubagentManager:
 
         # Create background task
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, report_progress)
         )
         self._running_tasks[task_id] = bg_task
 
@@ -88,7 +89,7 @@ class SubagentManager:
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
     async def _send_progress(self, origin: dict[str, str], text: str) -> None:
-        """向用户发送子任务进度消息。"""
+        """Send a progress message to the user."""
         await self.bus.publish_outbound(OutboundMessage(
             channel=origin["channel"],
             chat_id=origin["chat_id"],
@@ -96,22 +97,22 @@ class SubagentManager:
         ))
 
     def _format_progress(self, label: str, tool_name: str, args: dict, step: int) -> str:
-        """根据工具类型生成简短中文进度状态。"""
-        prefix = f"「{label}」[步骤 {step}]"
+        """Format a short progress status based on tool type."""
+        prefix = f"[{label}] step {step}"
         match tool_name:
             case "exec":
                 cmd = args.get("command", "")[:60]
-                return f"{prefix} 🔧 执行: {cmd}"
+                return f"{prefix} exec: {cmd}"
             case "read_file":
-                return f"{prefix} 📖 读取: {args.get('path', '')}"
+                return f"{prefix} read: {args.get('path', '')}"
             case "write_file":
-                return f"{prefix} 📝 写入: {args.get('path', '')}"
+                return f"{prefix} write: {args.get('path', '')}"
             case "web_search":
-                return f"{prefix} 🔍 搜索: {args.get('query', '')}"
+                return f"{prefix} search: {args.get('query', '')}"
             case "web_fetch":
-                return f"{prefix} 🌐 获取: {args.get('url', '')[:60]}"
+                return f"{prefix} fetch: {args.get('url', '')[:60]}"
             case _:
-                return f"{prefix} ⚙️ {tool_name}"
+                return f"{prefix} {tool_name}"
 
     async def _run_subagent(
         self,
@@ -119,6 +120,7 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        report_progress: bool = False,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info(f"Subagent [{task_id}] starting task: {label}")
@@ -156,7 +158,7 @@ class SubagentManager:
             while iteration < max_iterations:
                 elapsed = time.monotonic() - start_time
                 if elapsed > max_duration:
-                    final_result = f"任务执行超时（已运行 {int(elapsed)}s，上限 {max_duration}s），已完成 {iteration} 步。"
+                    final_result = f"Task timed out after {int(elapsed)}s (limit {max_duration}s), completed {iteration} steps."
                     logger.warning(f"Subagent [{task_id}] timed out after {int(elapsed)}s")
                     break
                 iteration += 1
@@ -186,12 +188,13 @@ class SubagentManager:
                         "tool_calls": tool_call_dicts,
                     })
 
-                    # Execute tools with progress reporting
+                    # Execute tools (with optional progress reporting)
                     for tool_call in response.tool_calls:
-                        progress_text = self._format_progress(
-                            label, tool_call.name, tool_call.arguments, iteration
-                        )
-                        await self._send_progress(origin, progress_text)
+                        if report_progress:
+                            progress_text = self._format_progress(
+                                label, tool_call.name, tool_call.arguments, iteration
+                            )
+                            await self._send_progress(origin, progress_text)
 
                         args_str = json.dumps(tool_call.arguments)
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name} with arguments: {args_str}")
@@ -208,7 +211,7 @@ class SubagentManager:
 
             if final_result is None:
                 elapsed = int(time.monotonic() - start_time)
-                final_result = f"任务达到步数上限（{iteration}/{max_iterations} 步，耗时 {elapsed}s），未生成最终结果。"
+                final_result = f"Task reached iteration limit ({iteration}/{max_iterations} steps, {elapsed}s elapsed), no final result produced."
 
             logger.info(f"Subagent [{task_id}] completed successfully")
             await self._announce_result(task_id, label, task, final_result, origin, "ok")

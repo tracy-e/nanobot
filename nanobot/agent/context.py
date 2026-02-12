@@ -48,6 +48,11 @@ class ContextBuilder:
         # Memory context
         memory = self.memory.get_memory_context()
         if memory:
+            # Append file index so agent knows what's searchable
+            all_files = self.memory.list_all_memory_files()
+            if all_files:
+                file_list = ", ".join(all_files)
+                memory += f"\n\n## Memory Files\n{file_list}\nUse memory_search tool to find relevant content."
             parts.append(f"# Memory\n\n{memory}")
         
         # Skills - progressive loading

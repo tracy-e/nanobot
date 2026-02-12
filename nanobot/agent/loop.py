@@ -18,6 +18,7 @@ from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.cron import CronTool
+from nanobot.agent.tools.memory_tool import MemorySearchTool
 from nanobot.agent.subagent import SubagentManager
 from nanobot.session.manager import SessionManager
 
@@ -109,6 +110,9 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Memory search tool
+        self.tools.register(MemorySearchTool(workspace=self.workspace))
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -238,7 +242,7 @@ class AgentLoop:
                 break
         
         if not final_content or not final_content.strip():
-            final_content = "处理完成。"
+            final_content = "Done."
 
         # Log response preview
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -345,7 +349,7 @@ class AgentLoop:
                 break
         
         if not final_content or not final_content.strip():
-            final_content = "后台任务已完成。"
+            final_content = "Background task completed."
         
         # Save to session (mark as system message in history)
         session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
