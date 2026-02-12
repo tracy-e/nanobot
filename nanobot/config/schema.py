@@ -213,10 +213,18 @@ class ExecToolConfig(BaseModel):
     timeout: int = 60
 
 
+class SubagentConfig(BaseModel):
+    """Subagent configuration."""
+    exec_timeout: int = 300       # subagent exec 超时 5 分钟（主 agent 默认 60s）
+    max_iterations: int = 100     # 最大迭代次数
+    max_duration: int = 600       # 总执行时长上限 10 分钟
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
+    subagent: SubagentConfig = Field(default_factory=SubagentConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
