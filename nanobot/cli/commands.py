@@ -324,7 +324,7 @@ def gateway(
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+    session_manager = SessionManager(config.workspace_path, provider=provider, compact_model=config.agents.defaults.compact_model)
     
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -416,6 +416,74 @@ def gateway(
 # ============================================================================
 
 
+async def _handle_cli_command(command: str, session_id: str, session_manager) -> bool:
+    """Handle slash commands in CLI interactive mode. Returns True if handled."""
+    if not command.startswith("/"):
+        return False
+
+    cmd = command.split()[0].lower()
+
+    if cmd == "/clear":
+        session = session_manager.get_or_create(session_id)
+        msg_count = len(session.messages)
+        session.clear()
+        session_manager.save(session)
+        console.print(f"[green]✓[/green] Cleared {msg_count} messages.\n")
+        return True
+
+    elif cmd == "/compact":
+        console.print("[dim]Compacting...[/dim]")
+        success, message = await session_manager.compact_session(session_id)
+        if success:
+            console.print(f"[green]✓[/green] {message}\n")
+        else:
+            console.print(f"[yellow]⚠[/yellow] {message}\n")
+        return True
+
+    elif cmd == "/skills":
+        skills_dir = session_manager.workspace / "skills"
+        if not skills_dir.exists():
+            console.print("[dim]No skills directory found.[/dim]\n")
+            return True
+        skills = []
+        for p in sorted(skills_dir.iterdir()):
+            if p.is_dir() and (p / "SKILL.md").exists():
+                skills.append(p.name)
+        if skills:
+            console.print("[cyan]Available skills:[/cyan]")
+            for s in skills:
+                console.print(f"  {s}")
+            console.print()
+        else:
+            console.print("[dim]No skills found.[/dim]\n")
+        return True
+
+    elif cmd == "/models":
+        provider = session_manager.provider
+        main_model = provider.get_default_model() if provider else "N/A"
+        compact_model = session_manager.compact_model or main_model
+        console.print(
+            "[cyan]Current models:[/cyan]\n"
+            f"  Main:    {main_model}\n"
+            f"  Compact: {compact_model}\n"
+        )
+        return True
+
+    elif cmd == "/help":
+        console.print(
+            "[cyan]nanobot commands:[/cyan]\n\n"
+            "  /clear   - Clear conversation history\n"
+            "  /compact - Compact conversation history\n"
+            "  /skills  - List available skills\n"
+            "  /models  - Show current models\n"
+            "  /help    - Show this help message\n"
+            "  exit     - Quit\n"
+        )
+        return True
+
+    return False
+
+
 @app.command()
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
@@ -427,10 +495,11 @@ def agent(
     from nanobot.config.loader import load_config
     from nanobot.bus.queue import MessageBus
     from nanobot.agent.loop import AgentLoop
+    from nanobot.session.manager import SessionManager
     from loguru import logger
-    
+
     config = load_config()
-    
+
     bus = MessageBus()
     provider = _make_provider(config)
 
@@ -438,7 +507,9 @@ def agent(
         logger.enable("nanobot")
     else:
         logger.disable("nanobot")
-    
+
+    session_manager = SessionManager(config.workspace_path, provider=provider, compact_model=config.agents.defaults.compact_model)
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -448,6 +519,7 @@ def agent(
         exec_config=config.tools.exec,
         subagent_config=config.tools.subagent,
         restrict_to_workspace=config.tools.restrict_to_workspace,
+        session_manager=session_manager,
     )
     
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -491,7 +563,12 @@ def agent(
                         _restore_terminal()
                         console.print("\nGoodbye!")
                         break
-                    
+
+                    # Handle slash commands locally
+                    handled = await _handle_cli_command(command, session_id, session_manager)
+                    if handled:
+                        continue
+
                     with _thinking_ctx():
                         response = await agent_loop.process_direct(user_input, session_id)
                     _print_agent_response(response, render_markdown=markdown)

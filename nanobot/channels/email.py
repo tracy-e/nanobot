@@ -51,8 +51,8 @@ class EmailChannel(BaseChannel):
         "Dec",
     )
 
-    def __init__(self, config: EmailConfig, bus: MessageBus):
-        super().__init__(config, bus)
+    def __init__(self, config: EmailConfig, bus: MessageBus, session_manager=None):
+        super().__init__(config, bus, session_manager=session_manager)
         self.config: EmailConfig = config
         self._last_subject_by_chat: dict[str, str] = {}
         self._last_message_id_by_chat: dict[str, str] = {}
@@ -88,10 +88,17 @@ class EmailChannel(BaseChannel):
                     if message_id:
                         self._last_message_id_by_chat[sender] = message_id
 
+                    # Handle slash commands (body is after the header block)
+                    raw_body = item["content"]
+                    _, _, body_text = raw_body.partition("\n\n")
+                    body_text = body_text.strip()
+                    if body_text and await self._try_handle_command(body_text, sender, sender_id=sender):
+                        continue
+
                     await self._handle_message(
                         sender_id=sender,
                         chat_id=sender,
-                        content=item["content"],
+                        content=raw_body,
                         metadata=item.get("metadata", {}),
                     )
             except Exception as e:

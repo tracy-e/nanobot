@@ -218,8 +218,8 @@ class MochatChannel(BaseChannel):
     name = "mochat"
     display_name = "Mochat"
 
-    def __init__(self, config: MochatConfig, bus: MessageBus):
-        super().__init__(config, bus)
+    def __init__(self, config: MochatConfig, bus: MessageBus, session_manager=None):
+        super().__init__(config, bus, session_manager=session_manager)
         self.config: MochatConfig = config
         self._http: httpx.AsyncClient | None = None
         self._socket: Any = None
@@ -678,6 +678,11 @@ class MochatChannel(BaseChannel):
             return
 
         raw_body = normalize_mochat_content(payload.get("content")) or "[empty message]"
+
+        # Handle slash commands
+        if await self._try_handle_command(raw_body, target_id, sender_id=author):
+            return
+
         ai = _safe_dict(payload.get("authorInfo"))
         sender_name = _str_field(ai, "nickname", "email")
         sender_username = _str_field(ai, "agentId")
