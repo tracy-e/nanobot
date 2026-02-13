@@ -17,10 +17,14 @@ from nanobot.providers.claude_oauth_auth import (
 
 
 # ---------------------------------------------------------------------------
-# Patch LiteLLM: Anthropic OAuth requires "Authorization: Bearer" but NOT
-# "x-api-key". LiteLLM always adds x-api-key which Anthropic rejects for
-# OAuth tokens. This patch lets callers remove headers by setting them to
-# None in extra_headers.
+# Patch LiteLLM for Claude Code OAuth compatibility:
+#
+# 1. validate_environment patch: lets callers remove headers by setting them
+#    to None in extra_headers (e.g. x-api-key=None to drop the API-key header).
+#
+# 2. Register custom beta headers: LiteLLM filters anthropic-beta values
+#    through a whitelist (anthropic_beta_headers_config.json). Our Claude Code
+#    headers (claude-code-*, oauth-*) would be silently dropped without this.
 # ---------------------------------------------------------------------------
 from litellm.llms.anthropic.chat.transformation import (
     AnthropicConfig as _AntConfig,
@@ -41,6 +45,21 @@ def _patched_validate_env(self, headers, *args, **kwargs):
 
 
 _AntConfig.validate_environment = _patched_validate_env
+
+# Register Claude Code beta headers in LiteLLM's whitelist so they survive
+# the update_headers_with_filtered_beta() filter pass.
+try:
+    from litellm.anthropic_beta_headers_manager import _load_beta_headers_config
+
+    _beta_cfg = _load_beta_headers_config()
+    _anthropic_map = _beta_cfg.get("anthropic", {})
+    for _h in (
+        "claude-code-20250219",
+        "oauth-2025-04-20",
+    ):
+        _anthropic_map.setdefault(_h, _h)
+except Exception:
+    pass
 
 
 class ClaudeOAuthProvider(LLMProvider):
@@ -104,18 +123,15 @@ class ClaudeOAuthProvider(LLMProvider):
             "max_tokens": max_tokens,
             "temperature": temperature,
             # Anthropic OAuth requires Authorization: Bearer, not x-api-key.
-            # LiteLLM detects OAuth tokens via lowercase "authorization" header
-            # and auto-adds unwanted headers. We override/remove them:
-            # - x-api-key=None: removed (OAuth doesn't use x-api-key)
-            # - anthropic-dangerous-direct-browser-access=None: removed
-            #   (browser flag triggers Claude Code restriction)
-            # - anthropic-beta: our Claude Code beta flags
+            # LiteLLM natively detects OAuth tokens and adds required headers
+            # (anthropic-dangerous-direct-browser-access, oauth beta).
+            # We only need to remove x-api-key (litellm sets it to the OAuth
+            # token, but Anthropic expects OAuth via Authorization header only).
             "api_key": "oauth-via-header",
             "extra_headers": {
                 "authorization": f"Bearer {token}",
                 "anthropic-beta": self.BETA_HEADER,
                 "x-api-key": None,
-                "anthropic-dangerous-direct-browser-access": None,
             },
         }
 

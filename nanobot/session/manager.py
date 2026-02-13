@@ -4,11 +4,17 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from loguru import logger
 
 from nanobot.utils.helpers import ensure_dir, safe_filename
+
+if TYPE_CHECKING:
+    from nanobot.providers.base import LLMProvider
+
+COMPACT_KEEP_RECENT = 5       # Messages to preserve after compact
+COMPACT_MAX_MESSAGES = 200    # Max messages to include in summary prompt
 
 
 @dataclass
@@ -39,16 +45,19 @@ class Session:
     def get_history(self, max_messages: int = 50) -> list[dict[str, Any]]:
         """
         Get message history for LLM context.
-        
+
         Args:
-            max_messages: Maximum messages to return.
-        
+            max_messages: Maximum messages to return (0 = all).
+
         Returns:
             List of messages in LLM format.
         """
-        # Get recent messages
-        recent = self.messages[-max_messages:] if len(self.messages) > max_messages else self.messages
-        
+        # Get recent messages (0 means all)
+        if max_messages > 0 and len(self.messages) > max_messages:
+            recent = self.messages[-max_messages:]
+        else:
+            recent = self.messages
+
         # Convert to LLM format (just role and content)
         return [{"role": m["role"], "content": m["content"]} for m in recent]
     
@@ -56,6 +65,34 @@ class Session:
         """Clear all messages in the session."""
         self.messages = []
         self.updated_at = datetime.now()
+    
+    def compact(self, summary: str) -> int:
+        """
+        Compact the session by replacing old messages with a summary.
+        
+        Args:
+            summary: The summary to replace old messages with.
+        
+        Returns:
+            Number of messages removed.
+        """
+        if len(self.messages) <= COMPACT_KEEP_RECENT:
+            return 0  # Too few messages to compact
+
+        old_count = len(self.messages)
+        recent = self.messages[-COMPACT_KEEP_RECENT:]
+        
+        # Replace with summary + recent messages
+        self.messages = [
+            {
+                "role": "system",
+                "content": f"[Previous conversation summary]\n{summary}",
+                "timestamp": datetime.now().isoformat(),
+            }
+        ] + recent
+        
+        self.updated_at = datetime.now()
+        return old_count - len(self.messages)
 
 
 class SessionManager:
@@ -65,10 +102,12 @@ class SessionManager:
     Sessions are stored as JSONL files in the sessions directory.
     """
     
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, provider: "LLMProvider | None" = None, compact_model: str = ""):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
         self._cache: dict[str, Session] = {}
+        self.provider = provider  # For compact functionality
+        self.compact_model = compact_model  # Cheaper model for summarization
     
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -200,3 +239,56 @@ class SessionManager:
                 continue
         
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+    
+    async def compact_session(self, key: str) -> tuple[bool, str]:
+        """
+        Compact a session by summarizing old messages.
+        
+        Args:
+            key: Session key.
+        
+        Returns:
+            Tuple of (success, message).
+        """
+        if not self.provider:
+            return False, "LLM provider not available for compacting."
+        
+        session = self.get_or_create(key)
+        
+        if len(session.messages) <= COMPACT_KEEP_RECENT:
+            return False, f"Not enough messages to compact (need more than {COMPACT_KEEP_RECENT})."
+
+        # Build summary prompt, capped to avoid exceeding context window
+        history = session.get_history(max_messages=0)
+        to_summarize = history[:-COMPACT_KEEP_RECENT]
+        if len(to_summarize) > COMPACT_MAX_MESSAGES:
+            to_summarize = to_summarize[-COMPACT_MAX_MESSAGES:]
+
+        prompt = (
+            "Summarize the following conversation concisely, preserving key context, "
+            "decisions, and important information. Keep it under 500 words.\n\n"
+            "Conversation:\n"
+        )
+        for msg in to_summarize:
+            prompt += f"{msg['role']}: {msg['content']}\n\n"
+
+        # Call LLM to generate summary
+        try:
+            response = await self.provider.chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.compact_model or self.provider.get_default_model(),
+                max_tokens=1000,
+            )
+            summary = response.content.strip()
+
+            if not summary:
+                return False, "Failed to generate summary."
+
+            summarized_count = len(session.messages) - COMPACT_KEEP_RECENT
+            session.compact(summary)
+            self.save(session)
+
+            return True, f"Summarized {summarized_count} messages, keeping last {COMPACT_KEEP_RECENT}."
+        except Exception as e:
+            logger.error(f"Error compacting session: {e}")
+            return False, f"Error: {e}"

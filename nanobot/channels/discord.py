@@ -24,8 +24,8 @@ class DiscordChannel(BaseChannel):
 
     name = "discord"
 
-    def __init__(self, config: DiscordConfig, bus: MessageBus):
-        super().__init__(config, bus)
+    def __init__(self, config: DiscordConfig, bus: MessageBus, session_manager=None):
+        super().__init__(config, bus, session_manager=session_manager)
         self.config: DiscordConfig = config
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._seq: int | None = None
@@ -106,6 +106,10 @@ class DiscordChannel(BaseChannel):
                         await asyncio.sleep(1)
         finally:
             await self._stop_typing(msg.chat_id)
+
+    async def _send_reply(self, chat_id: str, text: str) -> None:
+        """Override base to use direct Discord REST API."""
+        await self._send_text(chat_id, text)
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
@@ -197,6 +201,10 @@ class DiscordChannel(BaseChannel):
         if not self.is_allowed(sender_id):
             return
 
+        # Handle slash commands
+        if await self._try_handle_command(content, channel_id, sender_id=sender_id):
+            return
+
         content_parts = [content] if content else []
         media_paths: list[str] = []
         media_dir = Path.home() / ".nanobot" / "media"
@@ -259,3 +267,18 @@ class DiscordChannel(BaseChannel):
         task = self._typing_tasks.pop(channel_id, None)
         if task:
             task.cancel()
+
+    async def _send_text(self, channel_id: str, text: str) -> None:
+        """Send a simple text message to a Discord channel."""
+        if not self._http:
+            return
+
+        url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages"
+        payload = {"content": text}
+        headers = {"Authorization": f"Bot {self.config.token}"}
+
+        try:
+            response = await self._http.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+        except Exception as e:
+            logger.error(f"Error sending Discord text message: {e}")

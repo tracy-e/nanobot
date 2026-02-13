@@ -87,15 +87,6 @@ class MemoryStore:
         files = list(self.memory_dir.glob("????-??-??.md"))
         return sorted(files, reverse=True)
     
-    def _read_yesterday(self) -> str:
-        """Read yesterday's memory notes."""
-        from datetime import timedelta
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        yesterday_file = self.memory_dir / f"{yesterday}.md"
-        if yesterday_file.exists():
-            return yesterday_file.read_text(encoding="utf-8")
-        return ""
-
     def list_all_memory_files(self) -> list[str]:
         """List all .md file names in memory/ directory, newest first."""
         if not self.memory_dir.exists():
@@ -121,10 +112,5 @@ class MemoryStore:
         today = self.read_today()
         if today:
             parts.append("## Today's Notes\n" + today)
-
-        # Yesterday's notes
-        yesterday = self._read_yesterday()
-        if yesterday:
-            parts.append("## Yesterday's Notes\n" + yesterday)
 
         return "\n\n".join(parts) if parts else ""

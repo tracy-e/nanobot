@@ -57,7 +57,8 @@ class ChannelManager:
             try:
                 from nanobot.channels.whatsapp import WhatsAppChannel
                 self.channels["whatsapp"] = WhatsAppChannel(
-                    self.config.channels.whatsapp, self.bus
+                    self.config.channels.whatsapp, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("WhatsApp channel enabled")
             except ImportError as e:
@@ -68,7 +69,8 @@ class ChannelManager:
             try:
                 from nanobot.channels.discord import DiscordChannel
                 self.channels["discord"] = DiscordChannel(
-                    self.config.channels.discord, self.bus
+                    self.config.channels.discord, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("Discord channel enabled")
             except ImportError as e:
@@ -79,7 +81,8 @@ class ChannelManager:
             try:
                 from nanobot.channels.feishu import FeishuChannel
                 self.channels["feishu"] = FeishuChannel(
-                    self.config.channels.feishu, self.bus
+                    self.config.channels.feishu, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("Feishu channel enabled")
             except ImportError as e:
@@ -91,7 +94,8 @@ class ChannelManager:
                 from nanobot.channels.mochat import MochatChannel
 
                 self.channels["mochat"] = MochatChannel(
-                    self.config.channels.mochat, self.bus
+                    self.config.channels.mochat, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("Mochat channel enabled")
             except ImportError as e:
@@ -102,7 +106,8 @@ class ChannelManager:
             try:
                 from nanobot.channels.dingtalk import DingTalkChannel
                 self.channels["dingtalk"] = DingTalkChannel(
-                    self.config.channels.dingtalk, self.bus
+                    self.config.channels.dingtalk, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("DingTalk channel enabled")
             except ImportError as e:
@@ -113,7 +118,8 @@ class ChannelManager:
             try:
                 from nanobot.channels.email import EmailChannel
                 self.channels["email"] = EmailChannel(
-                    self.config.channels.email, self.bus
+                    self.config.channels.email, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("Email channel enabled")
             except ImportError as e:
@@ -124,7 +130,8 @@ class ChannelManager:
             try:
                 from nanobot.channels.slack import SlackChannel
                 self.channels["slack"] = SlackChannel(
-                    self.config.channels.slack, self.bus
+                    self.config.channels.slack, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("Slack channel enabled")
             except ImportError as e:
@@ -135,8 +142,8 @@ class ChannelManager:
             try:
                 from nanobot.channels.qq import QQChannel
                 self.channels["qq"] = QQChannel(
-                    self.config.channels.qq,
-                    self.bus,
+                    self.config.channels.qq, self.bus,
+                    session_manager=self.session_manager,
                 )
                 logger.info("QQ channel enabled")
             except ImportError as e:

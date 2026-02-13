@@ -53,8 +53,8 @@ class FeishuChannel(BaseChannel):
     
     name = "feishu"
     
-    def __init__(self, config: FeishuConfig, bus: MessageBus):
-        super().__init__(config, bus)
+    def __init__(self, config: FeishuConfig, bus: MessageBus, session_manager=None):
+        super().__init__(config, bus, session_manager=session_manager)
         self.config: FeishuConfig = config
         self._client: Any = None
         self._ws_client: Any = None
@@ -297,9 +297,13 @@ class FeishuChannel(BaseChannel):
             
             if not content:
                 return
-            
-            # Forward to message bus
+
+            # Handle slash commands
             reply_to = chat_id if chat_type == "group" else sender_id
+            if await self._try_handle_command(content, reply_to, sender_id=sender_id):
+                return
+
+            # Forward to message bus
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=reply_to,

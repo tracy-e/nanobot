@@ -21,8 +21,8 @@ class SlackChannel(BaseChannel):
 
     name = "slack"
 
-    def __init__(self, config: SlackConfig, bus: MessageBus):
-        super().__init__(config, bus)
+    def __init__(self, config: SlackConfig, bus: MessageBus, session_manager=None):
+        super().__init__(config, bus, session_manager=session_manager)
         self.config: SlackConfig = config
         self._web_client: AsyncWebClient | None = None
         self._socket_client: SocketModeClient | None = None
@@ -149,6 +149,10 @@ class SlackChannel(BaseChannel):
             return
 
         text = self._strip_bot_mention(text)
+
+        # Handle slash commands
+        if await self._try_handle_command(text, chat_id, sender_id=sender_id):
+            return
 
         thread_ts = event.get("thread_ts") or event.get("ts")
         # Add :eyes: reaction to the triggering message (best-effort)
