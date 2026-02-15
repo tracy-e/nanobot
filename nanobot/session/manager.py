@@ -21,15 +21,20 @@ COMPACT_MAX_MESSAGES = 200    # Max messages to include in summary prompt
 class Session:
     """
     A conversation session.
-    
+
     Stores messages in JSONL format for easy reading and persistence.
+
+    Important: Messages are append-only for LLM cache efficiency.
+    The consolidation process writes summaries to MEMORY.md/HISTORY.md
+    but does NOT modify the messages list or get_history() output.
     """
-    
+
     key: str  # channel:chat_id
     messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
+    last_consolidated: int = 0  # Number of messages already consolidated to files
     
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -42,28 +47,16 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
     
-    def get_history(self, max_messages: int = 50) -> list[dict[str, Any]]:
-        """
-        Get message history for LLM context.
-
-        Args:
-            max_messages: Maximum messages to return (0 = all).
-
-        Returns:
-            List of messages in LLM format.
-        """
-        # Get recent messages (0 means all)
-        if max_messages > 0 and len(self.messages) > max_messages:
-            recent = self.messages[-max_messages:]
-        else:
-            recent = self.messages
-
-        # Convert to LLM format (just role and content)
-        return [{"role": m["role"], "content": m["content"]} for m in recent]
+    def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
+        """Get recent messages in LLM format (role + content only).
+        Pass max_messages=0 to return all messages."""
+        msgs = self.messages if max_messages == 0 else self.messages[-max_messages:]
+        return [{"role": m["role"], "content": m["content"]} for m in msgs]
     
     def clear(self) -> None:
-        """Clear all messages in the session."""
+        """Clear all messages and reset session to initial state."""
         self.messages = []
+        self.last_consolidated = 0
         self.updated_at = datetime.now()
     
     def compact(self, summary: str) -> int:
@@ -98,10 +91,10 @@ class Session:
 class SessionManager:
     """
     Manages conversation sessions.
-    
+
     Sessions are stored as JSONL files in the sessions directory.
     """
-    
+
     def __init__(self, workspace: Path, provider: "LLMProvider | None" = None, compact_model: str = ""):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(Path.home() / ".nanobot" / "sessions")
@@ -124,11 +117,9 @@ class SessionManager:
         Returns:
             The session.
         """
-        # Check cache
         if key in self._cache:
             return self._cache[key]
         
-        # Try to load from disk
         session = self._load(key)
         if session is None:
             session = Session(key=key)
@@ -139,34 +130,37 @@ class SessionManager:
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
         path = self._get_session_path(key)
-        
+
         if not path.exists():
             return None
-        
+
         try:
             messages = []
             metadata = {}
             created_at = None
-            
+            last_consolidated = 0
+
             with open(path) as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
-                    
+
                     data = json.loads(line)
-                    
+
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
                         created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
-            
+
             return Session(
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
-                metadata=metadata
+                metadata=metadata,
+                last_consolidated=last_consolidated
             )
         except Exception as e:
             logger.warning(f"Failed to load session {key}: {e}")
@@ -175,42 +169,24 @@ class SessionManager:
     def save(self, session: Session) -> None:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
-        
+
         with open(path, "w") as f:
-            # Write metadata first
             metadata_line = {
                 "_type": "metadata",
                 "created_at": session.created_at.isoformat(),
                 "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata
+                "metadata": session.metadata,
+                "last_consolidated": session.last_consolidated
             }
             f.write(json.dumps(metadata_line) + "\n")
-            
-            # Write messages
             for msg in session.messages:
                 f.write(json.dumps(msg) + "\n")
-        
+
         self._cache[session.key] = session
     
-    def delete(self, key: str) -> bool:
-        """
-        Delete a session.
-        
-        Args:
-            key: Session key.
-        
-        Returns:
-            True if deleted, False if not found.
-        """
-        # Remove from cache
+    def invalidate(self, key: str) -> None:
+        """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
-        
-        # Remove file
-        path = self._get_session_path(key)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
     
     def list_sessions(self) -> list[dict[str, Any]]:
         """
