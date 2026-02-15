@@ -1,6 +1,6 @@
 ---
 name: cron
-description: Schedule reminders and recurring tasks.
+description: Schedule reminders and recurring tasks via cron tool. Supports intervals, cron expressions, and one-time execution.
 ---
 
 # Cron
