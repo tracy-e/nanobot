@@ -36,7 +36,18 @@ class LiteLLMProvider(LLMProvider):
         # provider_name (from config key) is the primary signal;
         # api_key / api_base are fallback for auto-detection.
         self._gateway = find_gateway(provider_name, api_key, api_base)
-        
+
+        # Local providers (Ollama, vLLM): bypass system proxy for localhost.
+        # macOS system proxy may route 127.0.0.1 through a proxy, causing
+        # Python HTTP libraries to fail while curl works fine.
+        if self._gateway and self._gateway.is_local and api_base:
+            from urllib.parse import urlparse
+            host = urlparse(api_base).hostname or ""
+            no_proxy = os.environ.get("NO_PROXY", os.environ.get("no_proxy", ""))
+            if host not in no_proxy:
+                entries = [e for e in no_proxy.split(",") if e] + [host]
+                os.environ["NO_PROXY"] = ",".join(entries)
+
         # Configure environment variables
         if api_key:
             self._setup_env(api_key, api_base, default_model)
@@ -75,15 +86,23 @@ class LiteLLMProvider(LLMProvider):
         if self._gateway:
             # Gateway mode: apply gateway prefix, skip provider-specific prefixes
             prefix = self._gateway.litellm_prefix
-            if self._gateway.strip_model_prefix:
+            # Strip user-facing prefix (e.g. "vllm/") before adding litellm
+            # prefix (e.g. "hosted_vllm/") to avoid double-prefixing.
+            user_prefix = f"{self._gateway.name}/"
+            if model.startswith(user_prefix):
+                model = model[len(user_prefix):]
+            elif self._gateway.strip_model_prefix:
                 model = model.split("/")[-1]
             if prefix and not model.startswith(f"{prefix}/"):
                 model = f"{prefix}/{model}"
             return model
-        
+
         # Standard mode: auto-prefix for known providers
         spec = find_by_model(model)
         if spec and spec.litellm_prefix:
+            user_prefix = f"{spec.name}/"
+            if model.startswith(user_prefix):
+                model = model[len(user_prefix):]
             if not any(model.startswith(s) for s in spec.skip_prefixes):
                 model = f"{spec.litellm_prefix}/{model}"
         
