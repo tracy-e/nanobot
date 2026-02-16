@@ -99,6 +99,7 @@ class TelegramChannel(BaseChannel):
         config: TelegramConfig,
         bus: MessageBus,
         groq_api_key: str = "",
+        session_manager=None,
     ):
         super().__init__(config, bus, session_manager=session_manager)
         self.config: TelegramConfig = config

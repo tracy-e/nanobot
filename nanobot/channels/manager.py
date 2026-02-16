@@ -23,12 +23,13 @@ class ChannelManager:
     - Route outbound messages
     """
     
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(self, config: Config, bus: MessageBus, session_manager=None):
         self.config = config
         self.bus = bus
+        self.session_manager = session_manager
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
-        
+
         self._init_channels()
     
     def _init_channels(self) -> None:
@@ -42,6 +43,7 @@ class ChannelManager:
                     self.config.channels.telegram,
                     self.bus,
                     groq_api_key=self.config.providers.groq.api_key,
+                    session_manager=self.session_manager,
                 )
                 logger.info("Telegram channel enabled")
             except ImportError as e:
