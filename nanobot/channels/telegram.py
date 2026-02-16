@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import TYPE_CHECKING
-
 from loguru import logger
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,9 +13,6 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import TelegramConfig
-
-if TYPE_CHECKING:
-    from nanobot.session.manager import SessionManager
 
 
 def _markdown_to_telegram_html(text: str) -> str:
@@ -95,10 +90,7 @@ class TelegramChannel(BaseChannel):
     # Commands registered with Telegram's command menu
     BOT_COMMANDS = [
         BotCommand("start", "Start the bot"),
-        BotCommand("clear", "Clear conversation history"),
-        BotCommand("compact", "Compact conversation history (summarize old messages)"),
-        BotCommand("skills", "List available skills"),
-        BotCommand("models", "Show current model configuration"),
+        BotCommand("new", "Start a new conversation"),
         BotCommand("help", "Show available commands"),
     ]
 
@@ -107,7 +99,7 @@ class TelegramChannel(BaseChannel):
         config: TelegramConfig,
         bus: MessageBus,
         groq_api_key: str = "",
-        session_manager: SessionManager | None = None,
+        session_manager=None,
     ):
         super().__init__(config, bus, session_manager=session_manager)
         self.config: TelegramConfig = config
@@ -134,11 +126,8 @@ class TelegramChannel(BaseChannel):
 
         # Add command handlers (Telegram native command menu)
         self._app.add_handler(CommandHandler("start", self._on_start))
-        self._app.add_handler(CommandHandler("clear", self._on_clear))
-        self._app.add_handler(CommandHandler("compact", self._on_compact))
-        self._app.add_handler(CommandHandler("skills", self._on_skills))
-        self._app.add_handler(CommandHandler("models", self._on_models))
-        self._app.add_handler(CommandHandler("help", self._on_help))
+        self._app.add_handler(CommandHandler("new", self._forward_command))
+        self._app.add_handler(CommandHandler("help", self._forward_command))
 
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
@@ -243,35 +232,15 @@ class TelegramChannel(BaseChannel):
             "Type /help to see available commands."
         )
 
-    async def _on_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /clear command — delegate to base."""
-        if not update.message:
+    async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Forward slash commands to the bus for unified handling in AgentLoop."""
+        if not update.message or not update.effective_user:
             return
-        await self._cmd_clear(str(update.message.chat_id))
-
-    async def _on_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /compact command — delegate to base."""
-        if not update.message:
-            return
-        await self._cmd_compact(str(update.message.chat_id))
-
-    async def _on_skills(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /skills command — delegate to base."""
-        if not update.message:
-            return
-        await self._cmd_skills(str(update.message.chat_id))
-
-    async def _on_models(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /models command — delegate to base."""
-        if not update.message:
-            return
-        await self._cmd_models(str(update.message.chat_id))
-
-    async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /help command — delegate to base."""
-        if not update.message:
-            return
-        await self._cmd_help(str(update.message.chat_id))
+        await self._handle_message(
+            sender_id=str(update.effective_user.id),
+            chat_id=str(update.message.chat_id),
+            content=update.message.text,
+        )
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages (text, photos, voice, documents)."""
