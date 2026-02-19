@@ -14,7 +14,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse
 # Override via constructor or config if new models are released.
 DEFAULT_MODEL_MAP: dict[str, str] = {
     "opus": "claude-opus-4-6",
-    "sonnet": "claude-sonnet-4-5-20250929",
+    "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5-20251001",
 }
 

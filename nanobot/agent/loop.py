@@ -320,9 +320,39 @@ class AgentLoop:
             asyncio.create_task(_consolidate_and_cleanup())
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started. Memory consolidation in progress.")
+        if cmd == "/clear":
+            msg_count = len(session.messages)
+            session.clear()
+            self.sessions.save(session)
+            logger.info(f"Session cleared for {key} (cleared {msg_count} messages)")
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content="Conversation history cleared. Let's start fresh!")
+        if cmd == "/compact":
+            if hasattr(self.sessions, "compact_session"):
+                success, message = await self.sessions.compact_session(key)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=message)
+            else:
+                # Fallback: use memory consolidation
+                await self._consolidate_memory(session, archive_all=True)
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                      content="Conversation compacted.")
+        if cmd == "/skills":
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=self._list_skills())
+        if cmd == "/models":
+            main_model = self.provider.get_default_model()
+            compact_model = getattr(self, "compact_model", "") or main_model
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=f"Current models:\n  Main: {main_model}\n  Compact: {compact_model}")
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
+                                  content="🐈 nanobot commands:\n"
+                                          "/new — Start a new conversation\n"
+                                          "/clear — Clear conversation history\n"
+                                          "/compact — Compact conversation history\n"
+                                          "/skills — List available skills\n"
+                                          "/models — Show current model config\n"
+                                          "/help — Show available commands")
 
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
@@ -406,6 +436,40 @@ class AgentLoop:
             chat_id=origin_chat_id,
             content=final_content
         )
+
+    def _list_skills(self) -> str:
+        """List available skills from workspace."""
+        skills_dir = self.workspace / "skills"
+        if not skills_dir.exists():
+            return "No skills directory found."
+        skills: list[str] = []
+        for skill_path in sorted(skills_dir.iterdir()):
+            if not skill_path.is_dir():
+                continue
+            skill_md = skill_path / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            skill_name = skill_path.name
+            description = ""
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+                if content.startswith("---"):
+                    end = content.find("---", 3)
+                    if end != -1:
+                        for line in content[3:end].split("\n"):
+                            line = line.strip()
+                            if line.startswith("description:"):
+                                description = line[len("description:"):].strip().strip("\"'")
+                                break
+            except Exception:
+                pass
+            if len(description) > 80:
+                description = description[:77] + "..."
+            entry = f"  {skill_name}" + (f" - {description}" if description else "")
+            skills.append(entry)
+        if not skills:
+            return "No skills found."
+        return "Available skills:\n" + "\n".join(skills)
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md.

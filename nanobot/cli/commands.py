@@ -288,6 +288,13 @@ def _make_provider(config: Config):
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
+    # Claude OAuth (uses Claude Code's OAuth token from macOS Keychain)
+    if provider_name == "claude_oauth" or model.startswith("claude-oauth/"):
+        from nanobot.providers.claude_oauth_provider import ClaudeOAuthProvider
+        # Strip "claude-oauth/" prefix to get the actual model name
+        actual_model = model.split("/", 1)[1] if "/" in model else model
+        return ClaudeOAuthProvider(model=actual_model)
+
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
         return OpenAICodexProvider(default_model=model)
@@ -363,7 +370,7 @@ def gateway(
         memory_window=config.agents.defaults.memory_window,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
-        subagent_config=config.agents.subagent,
+        subagent_config=config.tools.subagent,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
@@ -482,7 +489,7 @@ def agent(
         memory_window=config.agents.defaults.memory_window,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
-        subagent_config=config.agents.subagent,
+        subagent_config=config.tools.subagent,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,

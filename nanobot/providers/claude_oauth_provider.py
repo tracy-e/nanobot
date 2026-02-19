@@ -86,7 +86,7 @@ class ClaudeOAuthProvider(LLMProvider):
     }
     _TOOL_NAME_RMAP: dict[str, str] = {v: k for k, v in _TOOL_NAME_MAP.items()}
 
-    def __init__(self, model: str = "claude-sonnet-4-5-20250929"):
+    def __init__(self, model: str = "claude-sonnet-4-6"):
         super().__init__()
         self.model = model
         self._token: str | None = None
