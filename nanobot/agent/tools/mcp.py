@@ -40,7 +40,11 @@ class MCPServerHandle:
                 # trust_env=False prevents httpx from reading macOS system
                 # proxy settings (via urllib.request.getproxies), which would
                 # route localhost traffic through Clash/Surge and break MCP.
-                http_client = httpx.AsyncClient(trust_env=False)
+                # Use MCP-recommended timeouts (30s connect, 300s read for long tool calls).
+                http_client = httpx.AsyncClient(
+                    trust_env=False,
+                    timeout=httpx.Timeout(30.0, read=300.0),
+                )
                 read, write, _ = await self._stack.enter_async_context(
                     streamable_http_client(self.cfg.url, http_client=http_client)
                 )
