@@ -3,7 +3,6 @@
 import asyncio
 import json
 import re
-from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -90,7 +89,7 @@ class AgentLoop:
 
         self._running = False
         self._mcp_servers = mcp_servers or {}
-        self._mcp_stack: AsyncExitStack | None = None
+        self._mcp_handles: list = []
         self._mcp_connected = False
         self._register_default_tools()
 
@@ -135,9 +134,7 @@ class AgentLoop:
             return
         self._mcp_connected = True
         from nanobot.agent.tools.mcp import connect_mcp_servers
-        self._mcp_stack = AsyncExitStack()
-        await self._mcp_stack.__aenter__()
-        await connect_mcp_servers(self._mcp_servers, self.tools, self._mcp_stack)
+        self._mcp_handles = await connect_mcp_servers(self._mcp_servers, self.tools)
 
     def _set_tool_context(self, channel: str, chat_id: str) -> None:
         """Update context for all tools that need routing info."""
@@ -264,12 +261,12 @@ class AgentLoop:
 
     async def close_mcp(self) -> None:
         """Close MCP connections."""
-        if self._mcp_stack:
+        for handle in self._mcp_handles:
             try:
-                await self._mcp_stack.aclose()
-            except (RuntimeError, BaseExceptionGroup):
+                await handle.close()
+            except (RuntimeError, BaseExceptionGroup, Exception):
                 pass  # MCP SDK cancel scope cleanup is noisy but harmless
-            self._mcp_stack = None
+        self._mcp_handles = []
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -344,6 +341,9 @@ class AgentLoop:
             compact_model = getattr(self, "compact_model", "") or main_model
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=f"Current models:\n  Main: {main_model}\n  Compact: {compact_model}")
+        if cmd == "/mcp":
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                  content=self._list_mcp_servers())
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n"
@@ -352,6 +352,7 @@ class AgentLoop:
                                           "/compact — Compact conversation history\n"
                                           "/skills — List available skills\n"
                                           "/models — Show current model config\n"
+                                          "/mcp — List configured MCP servers\n"
                                           "/help — Show available commands")
 
         if len(session.messages) > self.memory_window:
@@ -471,6 +472,31 @@ class AgentLoop:
             return "No skills found."
         return "Available skills:\n" + "\n".join(skills)
 
+    def _list_mcp_servers(self) -> str:
+        """List configured MCP servers."""
+        if not self._mcp_servers:
+            return "No MCP servers configured."
+        lines: list[str] = []
+        for name, cfg in self._mcp_servers.items():
+            if hasattr(cfg, "url") and cfg.url:
+                lines.append(f"  {name} — {cfg.url}")
+            elif hasattr(cfg, "command") and cfg.command:
+                args = " ".join(cfg.args) if hasattr(cfg, "args") and cfg.args else ""
+                lines.append(f"  {name} — {cfg.command} {args}".rstrip())
+            else:
+                # dict-style config (from JSON)
+                url = cfg.get("url", "") if isinstance(cfg, dict) else ""
+                cmd = cfg.get("command", "") if isinstance(cfg, dict) else ""
+                if url:
+                    lines.append(f"  {name} — {url}")
+                elif cmd:
+                    args = " ".join(cfg.get("args", []))
+                    lines.append(f"  {name} — {cmd} {args}".rstrip())
+                else:
+                    lines.append(f"  {name}")
+        status = " (connected)" if self._mcp_connected else ""
+        return f"MCP servers{status}:\n" + "\n".join(lines)
+
     async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
         """Consolidate old messages into MEMORY.md + HISTORY.md.
 
@@ -577,13 +603,16 @@ Respond with ONLY valid JSON, no markdown fences."""
         Returns:
             The agent's response.
         """
-        await self._connect_mcp()
         msg = InboundMessage(
             channel=channel,
             sender_id="user",
             chat_id=chat_id,
             content=content
         )
+
+        # Defer MCP connection until actually needed (slash commands don't need it)
+        if not msg.content.strip().startswith("/"):
+            await self._connect_mcp()
 
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
         return response.content if response else ""
