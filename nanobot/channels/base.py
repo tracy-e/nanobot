@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 

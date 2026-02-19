@@ -6,15 +6,6 @@ from typing import Any
 
 import litellm
 from litellm import acompletion
-from loguru import logger
-
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-from nanobot.providers.claude_oauth_auth import (
-    get_claude_oauth_credentials,
-    get_claude_oauth_token,
-    trigger_claude_token_refresh,
-)
-
 
 # ---------------------------------------------------------------------------
 # Patch LiteLLM for Claude Code OAuth compatibility:
@@ -28,6 +19,14 @@ from nanobot.providers.claude_oauth_auth import (
 # ---------------------------------------------------------------------------
 from litellm.llms.anthropic.chat.transformation import (
     AnthropicConfig as _AntConfig,
+)
+from loguru import logger
+
+from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.claude_oauth_auth import (
+    get_claude_oauth_credentials,
+    get_claude_oauth_token,
+    trigger_claude_token_refresh,
 )
 
 _orig_validate_env = _AntConfig.validate_environment

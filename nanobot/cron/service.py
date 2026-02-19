@@ -46,20 +46,6 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
     return None
 
 
-def _validate_schedule_for_add(schedule: CronSchedule) -> None:
-    """Validate schedule fields that would otherwise create non-runnable jobs."""
-    if schedule.tz and schedule.kind != "cron":
-        raise ValueError("tz can only be used with cron schedules")
-
-    if schedule.kind == "cron" and schedule.tz:
-        try:
-            from zoneinfo import ZoneInfo
-
-            ZoneInfo(schedule.tz)
-        except Exception:
-            raise ValueError(f"unknown timezone '{schedule.tz}'") from None
-
-
 class CronService:
     """Service for managing and executing scheduled jobs."""
 
@@ -69,25 +55,19 @@ class CronService:
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
     ):
         self.store_path = store_path
-        self.on_job = on_job
+        self.on_job = on_job  # Callback to execute job, returns response text
         self._store: CronStore | None = None
-        self._last_mtime: float = 0.0
         self._timer_task: asyncio.Task | None = None
         self._running = False
 
     def _load_store(self) -> CronStore:
-        """Load jobs from disk. Reloads automatically if file was modified externally."""
-        if self._store and self.store_path.exists():
-            mtime = self.store_path.stat().st_mtime
-            if mtime != self._last_mtime:
-                logger.info("Cron: jobs.json modified externally, reloading")
-                self._store = None
+        """Load jobs from disk."""
         if self._store:
             return self._store
 
         if self.store_path.exists():
             try:
-                data = json.loads(self.store_path.read_text(encoding="utf-8"))
+                data = json.loads(self.store_path.read_text())
                 jobs = []
                 for j in data.get("jobs", []):
                     jobs.append(CronJob(
@@ -120,7 +100,7 @@ class CronService:
                     ))
                 self._store = CronStore(jobs=jobs)
             except Exception as e:
-                logger.warning("Failed to load cron store: {}", e)
+                logger.warning(f"Failed to load cron store: {e}")
                 self._store = CronStore()
         else:
             self._store = CronStore()
@@ -169,9 +149,8 @@ class CronService:
             ]
         }
 
-        self.store_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        self._last_mtime = self.store_path.stat().st_mtime
-    
+        self.store_path.write_text(json.dumps(data, indent=2))
+
     async def start(self) -> None:
         """Start the cron service."""
         self._running = True
@@ -179,7 +158,7 @@ class CronService:
         self._recompute_next_runs()
         self._save_store()
         self._arm_timer()
-        logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
+        logger.info(f"Cron service started with {len(self._store.jobs if self._store else [])} jobs")
 
     def stop(self) -> None:
         """Stop the cron service."""
@@ -226,7 +205,6 @@ class CronService:
 
     async def _on_timer(self) -> None:
         """Handle timer tick - run due jobs."""
-        self._load_store()
         if not self._store:
             return
 
@@ -245,7 +223,7 @@ class CronService:
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a single job."""
         start_ms = _now_ms()
-        logger.info("Cron: executing job '{}' ({})", job.name, job.id)
+        logger.info(f"Cron: executing job '{job.name}' ({job.id})")
 
         try:
             response = None
@@ -254,12 +232,12 @@ class CronService:
 
             job.state.last_status = "ok"
             job.state.last_error = None
-            logger.info("Cron: job '{}' completed", job.name)
+            logger.info(f"Cron: job '{job.name}' completed")
 
         except Exception as e:
             job.state.last_status = "error"
             job.state.last_error = str(e)
-            logger.error("Cron: job '{}' failed: {}", job.name, e)
+            logger.error(f"Cron: job '{job.name}' failed: {e}")
 
         job.state.last_run_at_ms = start_ms
         job.updated_at_ms = _now_ms()
@@ -295,7 +273,6 @@ class CronService:
     ) -> CronJob:
         """Add a new job."""
         store = self._load_store()
-        _validate_schedule_for_add(schedule)
         now = _now_ms()
 
         job = CronJob(
@@ -320,7 +297,7 @@ class CronService:
         self._save_store()
         self._arm_timer()
 
-        logger.info("Cron: added job '{}' ({})", name, job.id)
+        logger.info(f"Cron: added job '{name}' ({job.id})")
         return job
 
     def remove_job(self, job_id: str) -> bool:
@@ -333,7 +310,7 @@ class CronService:
         if removed:
             self._save_store()
             self._arm_timer()
-            logger.info("Cron: removed job {}", job_id)
+            logger.info(f"Cron: removed job {job_id}")
 
         return removed
 
