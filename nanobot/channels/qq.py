@@ -50,8 +50,8 @@ class QQChannel(BaseChannel):
 
     name = "qq"
 
-    def __init__(self, config: QQConfig, bus: MessageBus, session_manager=None):
-        super().__init__(config, bus, session_manager=session_manager)
+    def __init__(self, config: QQConfig, bus: MessageBus):
+        super().__init__(config, bus)
         self.config: QQConfig = config
         self._client: "botpy.Client | None" = None
         self._processed_ids: deque = deque(maxlen=1000)
@@ -122,10 +122,6 @@ class QQChannel(BaseChannel):
             user_id = str(getattr(author, 'id', None) or getattr(author, 'user_openid', 'unknown'))
             content = (data.content or "").strip()
             if not content:
-                return
-
-            # Handle slash commands
-            if await self._try_handle_command(content, user_id, sender_id=user_id):
                 return
 
             await self._handle_message(

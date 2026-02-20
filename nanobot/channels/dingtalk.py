@@ -96,8 +96,8 @@ class DingTalkChannel(BaseChannel):
 
     name = "dingtalk"
 
-    def __init__(self, config: DingTalkConfig, bus: MessageBus, session_manager=None):
-        super().__init__(config, bus, session_manager=session_manager)
+    def __init__(self, config: DingTalkConfig, bus: MessageBus):
+        super().__init__(config, bus)
         self.config: DingTalkConfig = config
         self._client: Any = None
         self._http: httpx.AsyncClient | None = None
@@ -231,11 +231,7 @@ class DingTalkChannel(BaseChannel):
         permission checks before publishing to the bus.
         """
         try:
-            # Handle slash commands
-            if await self._try_handle_command(str(content), sender_id, sender_id=sender_id):
-                return
-
-            logger.info(f"DingTalk inbound: {content} from {sender_name}")
+            logger.info("DingTalk inbound: {} from {}", content, sender_name)
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=sender_id,  # For private chat, chat_id == sender_id

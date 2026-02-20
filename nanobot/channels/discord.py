@@ -23,8 +23,8 @@ class DiscordChannel(BaseChannel):
 
     name = "discord"
 
-    def __init__(self, config: DiscordConfig, bus: MessageBus, session_manager=None):
-        super().__init__(config, bus, session_manager=session_manager)
+    def __init__(self, config: DiscordConfig, bus: MessageBus):
+        super().__init__(config, bus)
         self.config: DiscordConfig = config
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._seq: int | None = None
@@ -78,18 +78,53 @@ class DiscordChannel(BaseChannel):
             return
 
         url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
-        payload: dict[str, Any] = {"content": msg.content}
-
-        if msg.reply_to:
-            payload["message_reference"] = {"message_id": msg.reply_to}
-            payload["allowed_mentions"] = {"replied_user": False}
-
         headers = {"Authorization": f"Bot {self.config.token}"}
+
+        # Build message_reference if replying
+        message_reference = None
+        if msg.reply_to:
+            message_reference = {"message_id": msg.reply_to}
+
+        # Collect valid media files
+        media_files: list[Path] = []
+        if msg.media:
+            for path_str in msg.media:
+                p = Path(path_str)
+                if p.exists() and p.stat().st_size <= MAX_ATTACHMENT_BYTES:
+                    media_files.append(p)
+                else:
+                    logger.warning(f"Discord attachment skipped (missing or too large): {path_str}")
 
         try:
             for attempt in range(3):
                 try:
-                    response = await self._http.post(url, headers=headers, json=payload)
+                    if media_files:
+                        # Use multipart/form-data to send files
+                        import mimetypes
+                        files = []
+                        for i, fp in enumerate(media_files):
+                            mime, _ = mimetypes.guess_type(str(fp))
+                            mime = mime or "application/octet-stream"
+                            files.append(("files[{}]".format(i), (fp.name, fp.read_bytes(), mime)))
+
+                        payload_json: dict[str, Any] = {"content": msg.content or ""}
+                        if message_reference:
+                            payload_json["message_reference"] = message_reference
+                            payload_json["allowed_mentions"] = {"replied_user": False}
+
+                        response = await self._http.post(
+                            url,
+                            headers=headers,
+                            data={"payload_json": json.dumps(payload_json)},
+                            files=files,
+                        )
+                    else:
+                        payload: dict[str, Any] = {"content": msg.content}
+                        if message_reference:
+                            payload["message_reference"] = message_reference
+                            payload["allowed_mentions"] = {"replied_user": False}
+                        response = await self._http.post(url, headers=headers, json=payload)
+
                     if response.status_code == 429:
                         data = response.json()
                         retry_after = float(data.get("retry_after", 1.0))
@@ -105,10 +140,6 @@ class DiscordChannel(BaseChannel):
                         await asyncio.sleep(1)
         finally:
             await self._stop_typing(msg.chat_id)
-
-    async def _send_reply(self, chat_id: str, text: str) -> None:
-        """Override base to use direct Discord REST API."""
-        await self._send_text(chat_id, text)
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
@@ -198,10 +229,6 @@ class DiscordChannel(BaseChannel):
             return
 
         if not self.is_allowed(sender_id):
-            return
-
-        # Handle slash commands
-        if await self._try_handle_command(content, channel_id, sender_id=sender_id):
             return
 
         content_parts = [content] if content else []

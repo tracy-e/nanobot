@@ -21,8 +21,8 @@ class WhatsAppChannel(BaseChannel):
 
     name = "whatsapp"
 
-    def __init__(self, config: WhatsAppConfig, bus: MessageBus, session_manager=None):
-        super().__init__(config, bus, session_manager=session_manager)
+    def __init__(self, config: WhatsAppConfig, bus: MessageBus):
+        super().__init__(config, bus)
         self.config: WhatsAppConfig = config
         self._ws = None
         self._connected = False
@@ -109,10 +109,6 @@ class WhatsAppChannel(BaseChannel):
             user_id = pn if pn else sender
             sender_id = user_id.split("@")[0] if "@" in user_id else user_id
             logger.info(f"Sender {sender}")
-
-            # Handle slash commands
-            if await self._try_handle_command(content, sender, sender_id=sender_id):
-                return
 
             # Handle voice transcription if it's a voice message
             if content == "[Voice Message]":
