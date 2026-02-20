@@ -55,12 +55,14 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
+        compact_model: str = "",
     ):
         from nanobot.config.schema import ExecToolConfig, SubagentConfig
         self.bus = bus
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.compact_model = compact_model
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
