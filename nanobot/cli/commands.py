@@ -506,7 +506,9 @@ def agent(
         return console.status("[dim]nanobot is thinking...[/dim]", spinner="dots")
 
     async def _cli_progress(content: str) -> None:
-        console.print(f"  [dim]↳ {content}[/dim]")
+        # Strip tool tag if present (used by channel progress filtering)
+        text = content[len("\x00tool:"):] if content.startswith("\x00tool:") else content
+        console.print(f"  [dim]↳ {text}[/dim]")
 
     if message:
         # Single message mode

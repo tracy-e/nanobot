@@ -198,7 +198,8 @@ class AgentLoop:
                     clean = self._strip_think(response.content)
                     if clean:
                         await on_progress(clean)
-                    await on_progress(self._tool_hint(response.tool_calls))
+                    # Tag tool hints so channels can distinguish from interim text
+                    await on_progress("\x00tool:" + self._tool_hint(response.tool_calls))
 
                 tool_call_dicts = [
                     {
@@ -383,15 +384,23 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        async def _bus_progress(content: str) -> None:
-            meta = dict(msg.metadata or {})
-            meta["_progress"] = True
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
-            ))
+        if on_progress is None and self.bus and not session_key:
+            # Default: send tool-call progress via bus (for channel messages only,
+            # not for process_direct callers like cron/heartbeat which pass session_key)
+            async def _bus_progress(content: str) -> None:
+                if not content.startswith("\x00tool:"):
+                    return  # Skip interim text for channel users
+                tool_text = content[len("\x00tool:"):]
+                meta = dict(msg.metadata or {})
+                meta["_progress"] = True
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content=f"⏳ {tool_text}", metadata=meta,
+                ))
+            on_progress = _bus_progress
 
         final_content, tools_used = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages, on_progress=on_progress,
         )
 
         if final_content is None:
