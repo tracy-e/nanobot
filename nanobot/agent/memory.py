@@ -88,11 +88,11 @@ class MemoryStore:
         return sorted(files, reverse=True)
     
     def list_all_memory_files(self) -> list[str]:
-        """List all .md file names in memory/ directory, newest first."""
+        """List all .md files in memory/ directory (including subdirectories), newest first."""
         if not self.memory_dir.exists():
             return []
-        files = sorted(self.memory_dir.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
-        return [f.name for f in files]
+        files = sorted(self.memory_dir.rglob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        return [str(f.relative_to(self.memory_dir)) for f in files]
 
     def get_memory_context(self) -> str:
         """

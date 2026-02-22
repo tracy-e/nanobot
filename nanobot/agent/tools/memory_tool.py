@@ -87,7 +87,7 @@ class MemorySearchTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search through all memory files (MEMORY.md and daily notes) using keyword matching. "
+            "Search through all memory files (MEMORY.md, daily notes, topics, and knowledge) using keyword matching. "
             "Returns the most relevant snippets. Use this to find past context, decisions, or notes."
         )
 
@@ -146,31 +146,25 @@ class MemorySearchTool(Tool):
         if not self.memory_dir.exists():
             return chunks
 
-        # Always load MEMORY.md
-        memory_file = self.memory_dir / "MEMORY.md"
-        if memory_file.exists():
-            text = memory_file.read_text(encoding="utf-8")
-            chunks.extend(_split_chunks(text, "MEMORY.md"))
-
-        # Load topic files (non-date .md files, excluding MEMORY.md)
-        for f in self.memory_dir.glob("*.md"):
-            if f.name == "MEMORY.md":
-                continue
-            # Skip date-pattern files here, handle them separately with day filter
-            if re.match(r"\d{4}-\d{2}-\d{2}\.md$", f.name):
-                continue
-            text = f.read_text(encoding="utf-8")
-            chunks.extend(_split_chunks(text, f.name))
-
-        # Load daily notes within day range
         cutoff = datetime.now().date() - timedelta(days=days)
-        for f in self.memory_dir.glob("????-??-??.md"):
-            try:
-                file_date = datetime.strptime(f.stem, "%Y-%m-%d").date()
-            except ValueError:
+
+        for f in self.memory_dir.rglob("*.md"):
+            rel = f.relative_to(self.memory_dir)
+            source = str(rel)
+
+            # Daily notes (YYYY-MM-DD.md anywhere) — filter by date range
+            if re.match(r"\d{4}-\d{2}-\d{2}\.md$", f.name):
+                try:
+                    file_date = datetime.strptime(f.stem, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if file_date < cutoff:
+                    continue
+            # Skip HISTORY.md (append-only log, too large for search)
+            elif f.name == "HISTORY.md":
                 continue
-            if file_date >= cutoff:
-                text = f.read_text(encoding="utf-8")
-                chunks.extend(_split_chunks(text, f.name))
+
+            text = f.read_text(encoding="utf-8")
+            chunks.extend(_split_chunks(text, source))
 
         return chunks
