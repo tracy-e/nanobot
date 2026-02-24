@@ -388,14 +388,22 @@ class AgentLoop:
             logger.info("Session cleared for {} (cleared {} messages)", key, msg_count)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="Conversation history cleared. Let's start fresh!")
-        if cmd == "/compact":
-            if hasattr(self.sessions, "compact_session"):
-                success, message = await self.sessions.compact_session(key)
-                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=message)
-            else:
-                await self._consolidate_memory(session, archive_all=True)
+        if cmd == "/compact" or cmd.startswith("/compact "):
+            arg = msg.content.strip()[8:].strip()
+            if arg == "--switch":
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                      content="Conversation compacted.")
+                                      content=self._format_compact_model_list())
+            elif arg:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                      content=self._switch_compact_model(arg))
+            else:
+                if hasattr(self.sessions, "compact_session"):
+                    success, message = await self.sessions.compact_session(key)
+                    return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=message)
+                else:
+                    await self._consolidate_memory(session, archive_all=True)
+                    return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                          content="Conversation compacted.")
         if cmd == "/skills":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=self._list_skills())
@@ -415,7 +423,7 @@ class AgentLoop:
                                   content="nanobot commands:\n\n"
                                           "- /new — Start a new conversation\n"
                                           "- /clear — Clear conversation history\n"
-                                          "- /compact — Compact conversation history\n"
+                                          "- /compact — Compact conversation / switch compact model\n"
                                           "- /skills — List available skills\n"
                                           "- /model — Show/switch model\n"
                                           "- /mcp — List configured MCP servers\n"
@@ -610,6 +618,68 @@ class AgentLoop:
         self.subagents.provider = self.provider
         self.subagents.model = target
         return f"Switched: {old_model} -> {target}"
+
+    # -- /compact model helpers ------------------------------------------------
+
+    def _format_compact_model_list(self) -> str:
+        """Format current compact model and available models list."""
+        compact = self.compact_model or self.model
+        lines = [f"Compact: {compact}"]
+        if not self._available_models:
+            lines.append("\nNo models configured. Add a 'models' list to config.json agents.defaults.")
+            return "\n".join(lines)
+        lines.append("\nAvailable:")
+        for i, m in enumerate(self._available_models, 1):
+            marker = "  <-- current" if m == compact else ""
+            lines.append(f"  {i}. {m}{marker}")
+        lines.append("\nReply /compact <number> to switch.")
+        return "\n".join(lines)
+
+    def _switch_compact_model(self, arg: str) -> str:
+        """Switch the compact model. arg can be a 1-based index or full model name."""
+        if not self._available_models:
+            return "No models configured. Add a 'models' list to config.json agents.defaults."
+
+        # Resolve target model
+        target: str | None = None
+        if arg.isdigit():
+            idx = int(arg) - 1
+            if 0 <= idx < len(self._available_models):
+                target = self._available_models[idx]
+            else:
+                return f"Invalid index. Choose 1-{len(self._available_models)}."
+        else:
+            for m in self._available_models:
+                if m == arg or m.lower() == arg.lower():
+                    target = m
+                    break
+            if target is None:
+                matches = [m for m in self._available_models if arg.lower() in m.lower()]
+                if len(matches) == 1:
+                    target = matches[0]
+                elif len(matches) > 1:
+                    return f"Ambiguous match: {', '.join(matches)}"
+                else:
+                    return f"Model '{arg}' not in available list. Use /compact --switch to see options."
+
+        current_compact = self.compact_model or self.model
+        if target == current_compact:
+            return f"Already using {current_compact} for compact."
+
+        # Resolve or create provider
+        key = self._provider_key(target)
+        if key not in self._providers:
+            if not self._provider_factory:
+                return "Cannot switch: no provider factory configured."
+            try:
+                self._providers[key] = self._provider_factory(target)
+            except Exception as e:
+                return f"Failed to create provider for {target}: {e}"
+
+        old_compact = current_compact
+        self.compact_model = target
+        self._compact_provider = self._providers[key]
+        return f"Compact model switched: {old_compact} -> {target}"
 
     # -- end /model helpers ----------------------------------------------------
 
