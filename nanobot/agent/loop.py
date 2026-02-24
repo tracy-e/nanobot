@@ -7,7 +7,7 @@ import json
 import re
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -28,7 +28,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ExecToolConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig
     from nanobot.cron.service import CronService
 
 
@@ -50,10 +50,10 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
-        max_iterations: int = 20,
-        temperature: float = 0.7,
+        max_iterations: int = 40,
+        temperature: float = 0.1,
         max_tokens: int = 4096,
-        memory_window: int = 50,
+        memory_window: int = 100,
         brave_api_key: str | None = None,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
@@ -61,9 +61,13 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         compact_model: str = "",
+        channels_config: ChannelsConfig | None = None,
+        provider_factory: Callable[[str], LLMProvider] | None = None,
+        available_models: list[str] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
+        self.channels_config = channels_config
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
@@ -76,6 +80,22 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+
+        # /model switching support
+        self._provider_factory = provider_factory
+        self._available_models = available_models or []
+        self._providers: dict[str, LLMProvider] = {}
+        self._providers[self._provider_key(self.model)] = provider
+
+        # compact_model uses its own provider, not affected by /model switching
+        self._compact_provider: LLMProvider = provider
+        if compact_model and self._provider_key(compact_model) != self._provider_key(self.model):
+            if provider_factory:
+                try:
+                    self._compact_provider = provider_factory(compact_model)
+                    self._providers[self._provider_key(compact_model)] = self._compact_provider
+                except Exception:
+                    pass  # Fall back to main provider
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -98,6 +118,8 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
+        self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
+        self._consolidation_locks: dict[str, asyncio.Lock] = {}
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -174,9 +196,9 @@ class AgentLoop:
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
-        on_progress: Callable[[str], Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used)."""
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> tuple[str | None, list[str], list[dict]]:
+        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -193,13 +215,15 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
             )
 
+            if response.usage:
+                logger.info("Token usage: {}", response.usage)
+
             if response.has_tool_calls:
                 if on_progress:
                     clean = self._strip_think(response.content)
                     if clean:
                         await on_progress(clean)
-                    # Tag tool hints so channels can distinguish from interim text
-                    await on_progress("\x00tool:" + self._tool_hint(response.tool_calls))
+                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
 
                 tool_call_dicts = [
                     {
@@ -229,7 +253,14 @@ class AgentLoop:
                 final_content = self._strip_think(response.content)
                 break
 
-        return final_content, tools_used
+        if final_content is None and iteration >= self.max_iterations:
+            logger.warning("Max iterations ({}) reached", self.max_iterations)
+            final_content = (
+                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                "without completing the task. You can try breaking the task into smaller steps."
+            )
+
+        return final_content, tools_used, messages
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -275,6 +306,18 @@ class AgentLoop:
         self._running = False
         logger.info("Agent loop stopping")
 
+    def _get_consolidation_lock(self, session_key: str) -> asyncio.Lock:
+        lock = self._consolidation_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._consolidation_locks[session_key] = lock
+        return lock
+
+    def _prune_consolidation_lock(self, session_key: str, lock: asyncio.Lock) -> None:
+        """Drop lock entry if no longer in use."""
+        if not lock.locked():
+            self._consolidation_locks.pop(session_key, None)
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -290,13 +333,13 @@ class AgentLoop:
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
-                history=session.get_history(max_messages=self.memory_window),
+                history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _ = await self._run_agent_loop(messages)
-            session.add_message("user", f"[System: {msg.sender_id}] {msg.content}")
-            session.add_message("assistant", final_content or "Background task completed.")
+            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
                                   content=final_content or "Background task completed.")
@@ -310,19 +353,34 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            messages_to_archive = session.messages.copy()
+            lock = self._get_consolidation_lock(session.key)
+            self._consolidating.add(session.key)
+            try:
+                async with lock:
+                    snapshot = session.messages[session.last_consolidated:]
+                    if snapshot:
+                        temp = Session(key=session.key)
+                        temp.messages = list(snapshot)
+                        if not await self._consolidate_memory(temp, archive_all=True):
+                            return OutboundMessage(
+                                channel=msg.channel, chat_id=msg.chat_id,
+                                content="Memory archival failed, session not cleared. Please try again.",
+                            )
+            except Exception:
+                logger.exception("/new archival failed for {}", session.key)
+                return OutboundMessage(
+                    channel=msg.channel, chat_id=msg.chat_id,
+                    content="Memory archival failed, session not cleared. Please try again.",
+                )
+            finally:
+                self._consolidating.discard(session.key)
+                self._prune_consolidation_lock(session.key, lock)
+
             session.clear()
             self.sessions.save(session)
             self.sessions.invalidate(session.key)
-
-            async def _consolidate_and_cleanup():
-                temp = Session(key=session.key)
-                temp.messages = messages_to_archive
-                await self._consolidate_memory(temp, archive_all=True)
-
-            asyncio.create_task(_consolidate_and_cleanup())
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="New session started. Memory consolidation in progress.")
+                                  content="New session started.")
         if cmd == "/clear":
             msg_count = len(session.messages)
             session.clear()
@@ -335,21 +393,23 @@ class AgentLoop:
                 success, message = await self.sessions.compact_session(key)
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=message)
             else:
-                # Fallback: use memory consolidation
                 await self._consolidate_memory(session, archive_all=True)
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                       content="Conversation compacted.")
         if cmd == "/skills":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=self._list_skills())
-        if cmd == "/models":
-            main_model = self.provider.get_default_model()
-            compact_model = getattr(self, "compact_model", "") or main_model
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content=f"Current models:\n  Main: {main_model}\n  Compact: {compact_model}")
         if cmd == "/mcp":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content=self._list_mcp_servers())
+        if cmd == "/model" or cmd.startswith("/model "):
+            arg = msg.content.strip()[6:].strip()
+            if not arg:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                      content=self._format_model_list())
+            else:
+                return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
+                                      content=self._switch_model(arg))
         if cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="nanobot commands:\n\n"
@@ -357,50 +417,52 @@ class AgentLoop:
                                           "- /clear — Clear conversation history\n"
                                           "- /compact — Compact conversation history\n"
                                           "- /skills — List available skills\n"
-                                          "- /models — Show current model config\n"
+                                          "- /model — Show/switch model\n"
                                           "- /mcp — List configured MCP servers\n"
                                           "- /help — Show available commands")
 
-        if len(session.messages) > self.memory_window and session.key not in self._consolidating:
+        unconsolidated = len(session.messages) - session.last_consolidated
+        if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
             self._consolidating.add(session.key)
+            lock = self._get_consolidation_lock(session.key)
 
             async def _consolidate_and_unlock():
                 try:
-                    await self._consolidate_memory(session)
+                    async with lock:
+                        await self._consolidate_memory(session)
                 finally:
                     self._consolidating.discard(session.key)
+                    self._prune_consolidation_lock(session.key, lock)
+                    _task = asyncio.current_task()
+                    if _task is not None:
+                        self._consolidation_tasks.discard(_task)
 
-            asyncio.create_task(_consolidate_and_unlock())
+            _task = asyncio.create_task(_consolidate_and_unlock())
+            self._consolidation_tasks.add(_task)
 
         self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        history = session.get_history(max_messages=self.memory_window)
         initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
+            history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        if on_progress is None and self.bus and not session_key:
-            # Default: send tool-call progress via bus (for channel messages only,
-            # not for process_direct callers like cron/heartbeat which pass session_key)
-            async def _bus_progress(content: str) -> None:
-                if not content.startswith("\x00tool:"):
-                    return  # Skip interim text for channel users
-                tool_text = content[len("\x00tool:"):]
-                meta = dict(msg.metadata or {})
-                meta["_progress"] = True
-                await self.bus.publish_outbound(OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id,
-                    content=f"⏳ {tool_text}", metadata=meta,
-                ))
-            on_progress = _bus_progress
+        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+            meta = dict(msg.metadata or {})
+            meta["_progress"] = True
+            meta["_tool_hint"] = tool_hint
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+            ))
 
-        final_content, tools_used = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress,
+        final_content, _, all_msgs = await self._run_agent_loop(
+            initial_messages, on_progress=on_progress or _bus_progress,
         )
 
         if final_content is None:
@@ -409,9 +471,7 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        session.add_message("user", msg.content)
-        session.add_message("assistant", final_content,
-                            tools_used=tools_used if tools_used else None)
+        self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
 
         if message_tool := self.tools.get("message"):
@@ -469,7 +529,6 @@ class AgentLoop:
                 args = " ".join(cfg.args) if hasattr(cfg, "args") and cfg.args else ""
                 lines.append(f"  {name} — {cfg.command} {args}".rstrip())
             else:
-                # dict-style config (from JSON)
                 url = cfg.get("url", "") if isinstance(cfg, dict) else ""
                 cmd = cfg.get("command", "") if isinstance(cfg, dict) else ""
                 if url:
@@ -482,10 +541,101 @@ class AgentLoop:
         status = " (connected)" if self._mcp_connected else ""
         return f"MCP servers{status}:\n" + "\n".join(lines)
 
-    async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
-        """Delegate to MemoryStore.consolidate()."""
-        await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.compact_model or self.model,
+    # -- /model helpers --------------------------------------------------------
+
+    @staticmethod
+    def _provider_key(model: str) -> str:
+        """Extract provider key from model name (e.g. 'claude-oauth' from 'claude-oauth/claude-sonnet-4-6')."""
+        return model.split("/")[0] if "/" in model else "default"
+
+    def _format_model_list(self) -> str:
+        """Format current model and available models list."""
+        compact = self.compact_model or self.model
+        lines = [f"Main: {self.model}", f"Compact: {compact}"]
+        if not self._available_models:
+            lines.append("\nNo models configured. Add a 'models' list to config.json agents.defaults.")
+            return "\n".join(lines)
+        lines.append("\nAvailable:")
+        for i, m in enumerate(self._available_models, 1):
+            marker = "  <-- current" if m == self.model else ""
+            lines.append(f"  {i}. {m}{marker}")
+        lines.append("\nReply /model <number> to switch.")
+        return "\n".join(lines)
+
+    def _switch_model(self, arg: str) -> str:
+        """Switch the active model. arg can be a 1-based index or full model name."""
+        if not self._available_models:
+            return "No models configured. Add a 'models' list to config.json agents.defaults."
+
+        # Resolve target model
+        target: str | None = None
+        if arg.isdigit():
+            idx = int(arg) - 1
+            if 0 <= idx < len(self._available_models):
+                target = self._available_models[idx]
+            else:
+                return f"Invalid index. Choose 1-{len(self._available_models)}."
+        else:
+            # Match by full name or substring
+            for m in self._available_models:
+                if m == arg or m.lower() == arg.lower():
+                    target = m
+                    break
+            if target is None:
+                # Try substring match
+                matches = [m for m in self._available_models if arg.lower() in m.lower()]
+                if len(matches) == 1:
+                    target = matches[0]
+                elif len(matches) > 1:
+                    return f"Ambiguous match: {', '.join(matches)}"
+                else:
+                    return f"Model '{arg}' not in available list. Use /model to see options."
+
+        if target == self.model:
+            return f"Already using {self.model}."
+
+        # Resolve or create provider
+        key = self._provider_key(target)
+        if key not in self._providers:
+            if not self._provider_factory:
+                return "Cannot switch: no provider factory configured."
+            try:
+                self._providers[key] = self._provider_factory(target)
+            except Exception as e:
+                return f"Failed to create provider for {target}: {e}"
+
+        old_model = self.model
+        self.provider = self._providers[key]
+        self.model = target
+        self.subagents.provider = self.provider
+        self.subagents.model = target
+        return f"Switched: {old_model} -> {target}"
+
+    # -- end /model helpers ----------------------------------------------------
+
+    _TOOL_RESULT_MAX_CHARS = 500
+
+    def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
+        """Save new-turn messages into session, truncating large tool results."""
+        from datetime import datetime
+        for m in messages[skip:]:
+            entry = {k: v for k, v in m.items() if k != "reasoning_content"}
+            if entry.get("role") == "tool" and isinstance(entry.get("content"), str):
+                content = entry["content"]
+                if len(content) > self._TOOL_RESULT_MAX_CHARS:
+                    entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
+            entry.setdefault("timestamp", datetime.now().isoformat())
+            session.messages.append(entry)
+        session.updated_at = datetime.now()
+
+    async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
+        """Delegate to MemoryStore.consolidate(). Returns True on success."""
+        # Always use _compact_provider (not the current switched provider)
+        # so memory consolidation works even after /model switching.
+        compact_provider = self._compact_provider
+        compact_model = self.compact_model or self.model
+        return await MemoryStore(self.workspace).consolidate(
+            session, compact_provider, compact_model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
 

@@ -184,6 +184,7 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    models: list[str] = Field(default_factory=list)  # Available models for /model switching
     compact_model: str = ""  # Model for /compact summarization; empty = use default model
     max_tokens: int = 8192
     temperature: float = 0.7

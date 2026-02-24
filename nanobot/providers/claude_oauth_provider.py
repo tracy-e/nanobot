@@ -122,6 +122,9 @@ class ClaudeOAuthProvider(LLMProvider):
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            # Explicitly set api_base to prevent litellm from using a stale
+            # global litellm.api_base set by another provider (e.g. Ollama).
+            "api_base": "https://api.anthropic.com/v1/messages",
             # Anthropic OAuth requires Authorization: Bearer, not x-api-key.
             # LiteLLM natively detects OAuth tokens and adds required headers
             # (anthropic-dangerous-direct-browser-access, oauth beta).
@@ -138,6 +141,15 @@ class ClaudeOAuthProvider(LLMProvider):
         if tools:
             kwargs["tools"] = self._remap_tools(tools)
             kwargs["tool_choice"] = "auto"
+
+        # Apply prompt caching — Anthropic supports cache_control on
+        # system message, tool definitions, and conversation turns.
+        messages, tools_out = self._apply_cache_control(
+            kwargs["messages"], kwargs.get("tools")
+        )
+        kwargs["messages"] = messages
+        if tools_out is not None:
+            kwargs["tools"] = tools_out
 
         # Transient errors worth retrying (server-side / network issues).
         _retryable = (
@@ -180,6 +192,59 @@ class ClaudeOAuthProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return f"claude-oauth/{self.model}"
+
+    # ------------------------------------------------------------------
+    # Prompt caching
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _apply_cache_control(
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+        """Inject cache_control breakpoints for Anthropic prompt caching.
+
+        Breakpoints:
+        1. System message — stable across turns.
+        2. Last tool definition — semi-stable.
+        3. Penultimate message — caches conversation history.
+        """
+        new_messages = list(messages)
+
+        # Breakpoint 1: last system message — caches ALL system content
+        # (Claude OAuth prepends a short prefix system message; we want
+        # the breakpoint on the LAST system msg so the entire system
+        # prefix including the large nanobot prompt is cached.)
+        last_sys_idx = None
+        for i, msg in enumerate(new_messages):
+            if msg.get("role") == "system":
+                last_sys_idx = i
+        if last_sys_idx is not None:
+            msg = new_messages[last_sys_idx]
+            content = msg["content"]
+            if isinstance(content, str):
+                new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+            else:
+                new_content = list(content)
+                new_content[-1] = {**new_content[-1], "cache_control": {"type": "ephemeral"}}
+            new_messages[last_sys_idx] = {**msg, "content": new_content}
+
+        # Breakpoint 3: penultimate message — caches conversation history
+        if len(new_messages) >= 3:
+            idx = len(new_messages) - 2
+            penultimate = new_messages[idx]
+            content = penultimate.get("content")
+            if isinstance(content, str) and content:
+                new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                new_messages[idx] = {**penultimate, "content": new_content}
+
+        # Breakpoint 2: last tool definition
+        new_tools = tools
+        if tools:
+            new_tools = list(tools)
+            new_tools[-1] = {**new_tools[-1], "cache_control": {"type": "ephemeral"}}
+
+        return new_messages, new_tools
 
     # ------------------------------------------------------------------
     # Token management
@@ -288,11 +353,17 @@ class ClaudeOAuthProvider(LLMProvider):
 
         usage = {}
         if hasattr(response, "usage") and response.usage:
+            u = response.usage
             usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "total_tokens": u.total_tokens,
             }
+            # Anthropic cache metrics (returned when cache_control is used)
+            for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+                val = getattr(u, key, None)
+                if val is not None:
+                    usage[key] = val
 
         reasoning_content = getattr(message, "reasoning_content", None)
 
