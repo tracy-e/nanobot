@@ -178,10 +178,20 @@ class AgentLoop:
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
-        """Remove <think>…</think> blocks that some models embed in content."""
+        """Remove <think>…</think> blocks that some models embed in content.
+
+        Handles paired blocks, orphaned </think> (when the opening tag was
+        split into reasoning_content), and unclosed <think>... at the end.
+        """
         if not text:
             return None
-        return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+        # 1. Paired blocks
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text)
+        # 2. Unclosed <think>... at end of string
+        text = re.sub(r"<think>[\s\S]*$", "", text)
+        # 3. Orphaned tags
+        text = re.sub(r"</?think>", "", text)
+        return text.strip() or None
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
@@ -251,6 +261,12 @@ class AgentLoop:
                     )
             else:
                 final_content = self._strip_think(response.content)
+                # Save the final assistant response into messages so
+                # _save_turn persists it into session history.
+                messages = self.context.add_assistant_message(
+                    messages, final_content,
+                    reasoning_content=response.reasoning_content,
+                )
                 break
 
         if final_content is None and iteration >= self.max_iterations:
