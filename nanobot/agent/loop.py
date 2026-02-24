@@ -485,7 +485,7 @@ class AgentLoop:
     async def _consolidate_memory(self, session, archive_all: bool = False) -> None:
         """Delegate to MemoryStore.consolidate()."""
         await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
+            session, self.provider, self.compact_model or self.model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
 

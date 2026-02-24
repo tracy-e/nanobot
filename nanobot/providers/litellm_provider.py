@@ -1,14 +1,27 @@
 """LiteLLM provider implementation for multi-provider support."""
 
+import asyncio
 import os
 from typing import Any
 
 import json_repair
 import litellm
 from litellm import acompletion
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
+
+# Transient LiteLLM exceptions worth retrying (server-side / network issues).
+_RETRYABLE_EXCEPTIONS = (
+    litellm.InternalServerError,      # 500 — includes "Server disconnected"
+    litellm.ServiceUnavailableError,   # 503
+    litellm.APIConnectionError,        # Network-level failures
+    litellm.Timeout,                   # Request timeout
+)
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds, doubles each attempt
 
 
 class LiteLLMProvider(LLMProvider):
@@ -174,15 +187,31 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        try:
-            response = await acompletion(**kwargs)
-            return self._parse_response(response)
-        except Exception as e:
-            # Return error as content for graceful handling
-            return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
-                finish_reason="error",
-            )
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = await acompletion(**kwargs)
+                return self._parse_response(response)
+            except _RETRYABLE_EXCEPTIONS as e:
+                last_exc = e
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "LLM transient error (attempt {}/{}): {} — retrying in {:.0f}s",
+                    attempt + 1, _MAX_RETRIES, e, delay,
+                )
+                await asyncio.sleep(delay)
+            except Exception as e:
+                # Non-retryable error — return immediately
+                return LLMResponse(
+                    content=f"Error calling LLM: {str(e)}",
+                    finish_reason="error",
+                )
+
+        # All retries exhausted
+        return LLMResponse(
+            content=f"Error calling LLM (after {_MAX_RETRIES} retries): {last_exc}",
+            finish_reason="error",
+        )
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""

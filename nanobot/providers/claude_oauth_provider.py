@@ -1,5 +1,6 @@
 """Claude OAuth provider — uses LiteLLM with OAuth token from macOS Keychain."""
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -138,19 +139,44 @@ class ClaudeOAuthProvider(LLMProvider):
             kwargs["tools"] = self._remap_tools(tools)
             kwargs["tool_choice"] = "auto"
 
-        try:
-            response = await acompletion(**kwargs)
-            return self._parse_response(response)
-        except litellm.AuthenticationError:
-            # 401 → trigger Claude Code to refresh token, then retry
-            logger.info("OAuth token rejected (401), triggering refresh…")
-            self._token = None
-            self._expires_at = None
-            trigger_claude_token_refresh()
-            token = self._get_token()
-            kwargs["extra_headers"]["authorization"] = f"Bearer {token}"
-            response = await acompletion(**kwargs)
-            return self._parse_response(response)
+        # Transient errors worth retrying (server-side / network issues).
+        _retryable = (
+            litellm.InternalServerError,
+            litellm.ServiceUnavailableError,
+            litellm.APIConnectionError,
+            litellm.Timeout,
+        )
+        max_retries = 3
+
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                response = await acompletion(**kwargs)
+                return self._parse_response(response)
+            except litellm.AuthenticationError:
+                # 401 → trigger Claude Code to refresh token, then retry once
+                logger.info("OAuth token rejected (401), triggering refresh…")
+                self._token = None
+                self._expires_at = None
+                trigger_claude_token_refresh()
+                token = self._get_token()
+                kwargs["extra_headers"]["authorization"] = f"Bearer {token}"
+                response = await acompletion(**kwargs)
+                return self._parse_response(response)
+            except _retryable as e:
+                last_exc = e
+                delay = 1.0 * (2 ** attempt)
+                logger.warning(
+                    "OAuth LLM transient error (attempt {}/{}): {} — retrying in {:.0f}s",
+                    attempt + 1, max_retries, e, delay,
+                )
+                await asyncio.sleep(delay)
+
+        # All retries exhausted
+        return LLMResponse(
+            content=f"Error calling LLM (after {max_retries} retries): {last_exc}",
+            finish_reason="error",
+        )
 
     def get_default_model(self) -> str:
         return f"claude-oauth/{self.model}"

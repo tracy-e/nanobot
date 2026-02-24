@@ -309,7 +309,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="",
         default_api_base="",
         strip_model_prefix=False,
-        model_overrides=(),
+        model_overrides=(
+            ("qwen3.5", {"extra_body": {"enable_thinking": False}}),
+        ),
     ),
 
     # Moonshot: Kimi models, needs "moonshot/" prefix.
