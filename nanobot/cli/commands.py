@@ -282,6 +282,7 @@ def _make_provider(config: Config, model: str | None = None):
 def gateway(
     port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    model: str | None = typer.Option(None, "--model", "-m", help="Override default model at startup"),
 ):
     """Start the nanobot gateway."""
     from nanobot.agent.loop import AgentLoop
@@ -300,12 +301,18 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
 
     config = load_config()
+    data_dir = get_data_dir()
     bus = MessageBus()
-    provider = _make_provider(config)
+
+    # Resolve model: --model flag > .state.json > config default
+    if not model:
+        model = AgentLoop.load_persisted_model(data_dir) or config.agents.defaults.model
+
+    provider = _make_provider(config, model)
     session_manager = SessionManager(config.workspace_path)
 
     # Create cron service first (callback set after agent creation)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron_store_path = data_dir / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
     # Create agent with cron service
@@ -313,7 +320,7 @@ def gateway(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -328,6 +335,7 @@ def gateway(
         channels_config=config.channels,
         provider_factory=lambda m: _make_provider(config, m),
         available_models=config.agents.defaults.models,
+        data_dir=data_dir,
     )
 
     # Set cron callback (needs agent)
@@ -441,6 +449,7 @@ def agent(
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    model: str | None = typer.Option(None, "--model", help="Override default model"),
 ):
     """Interact with the agent directly."""
     from loguru import logger
@@ -451,12 +460,17 @@ def agent(
     from nanobot.cron.service import CronService
 
     config = load_config()
+    data_dir = get_data_dir()
+
+    # Resolve model: --model flag > .state.json > config default
+    if not model:
+        model = AgentLoop.load_persisted_model(data_dir) or config.agents.defaults.model
 
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider = _make_provider(config, model)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron_store_path = data_dir / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
     if logs:
@@ -468,7 +482,7 @@ def agent(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
-        model=config.agents.defaults.model,
+        model=model,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -482,6 +496,7 @@ def agent(
         channels_config=config.channels,
         provider_factory=lambda m: _make_provider(config, m),
         available_models=config.agents.defaults.models,
+        data_dir=data_dir,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on

@@ -64,6 +64,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         provider_factory: Callable[[str], LLMProvider] | None = None,
         available_models: list[str] | None = None,
+        data_dir: Path | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
@@ -80,6 +81,8 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+
+        self._data_dir = data_dir
 
         # /model switching support
         self._provider_factory = provider_factory
@@ -633,7 +636,32 @@ class AgentLoop:
         self.model = target
         self.subagents.provider = self.provider
         self.subagents.model = target
+        self._persist_model(target)
         return f"Switched: {old_model} -> {target}"
+
+    _STATE_FILE = ".state.json"
+
+    def _persist_model(self, model: str) -> None:
+        """Write the selected model to .state.json so it survives restarts."""
+        if not self._data_dir:
+            return
+        try:
+            state_path = self._data_dir / self._STATE_FILE
+            state_path.write_text(json.dumps({"model": model}), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to persist model selection: {}", e)
+
+    @staticmethod
+    def load_persisted_model(data_dir: Path) -> str | None:
+        """Read the persisted model from .state.json, or None if unavailable."""
+        try:
+            state_path = data_dir / ".state.json"
+            if state_path.is_file():
+                data = json.loads(state_path.read_text(encoding="utf-8"))
+                return data.get("model") or None
+        except Exception:
+            pass
+        return None
 
     # -- /compact model helpers ------------------------------------------------
 
