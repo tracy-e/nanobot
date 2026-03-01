@@ -77,6 +77,7 @@ class ClaudeCodeProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Send message to Claude Code CLI and return the result."""
         user_message = self._extract_user_message(messages)

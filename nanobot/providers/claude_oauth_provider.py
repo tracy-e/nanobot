@@ -106,6 +106,7 @@ class ClaudeOAuthProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         token = self._get_token()
 
@@ -141,6 +142,10 @@ class ClaudeOAuthProvider(LLMProvider):
         if tools:
             kwargs["tools"] = self._remap_tools(tools)
             kwargs["tool_choice"] = "auto"
+
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["drop_params"] = True
 
         # Apply prompt caching — Anthropic supports cache_control on
         # system message, tool definitions, and conversation turns.

@@ -636,32 +636,34 @@ class AgentLoop:
         self.model = target
         self.subagents.provider = self.provider
         self.subagents.model = target
-        self._persist_model(target)
+        self._persist_state()
         return f"Switched: {old_model} -> {target}"
 
     _STATE_FILE = ".state.json"
 
-    def _persist_model(self, model: str) -> None:
-        """Write the selected model to .state.json so it survives restarts."""
+    def _persist_state(self) -> None:
+        """Write model and compact_model to .state.json so they survive restarts."""
         if not self._data_dir:
             return
         try:
             state_path = self._data_dir / self._STATE_FILE
-            state_path.write_text(json.dumps({"model": model}), encoding="utf-8")
+            state: dict[str, str] = {"model": self.model}
+            if self.compact_model:
+                state["compact_model"] = self.compact_model
+            state_path.write_text(json.dumps(state), encoding="utf-8")
         except Exception as e:
             logger.warning("Failed to persist model selection: {}", e)
 
     @staticmethod
-    def load_persisted_model(data_dir: Path) -> str | None:
-        """Read the persisted model from .state.json, or None if unavailable."""
+    def load_persisted_state(data_dir: Path) -> dict[str, str]:
+        """Read persisted model/compact_model from .state.json."""
         try:
             state_path = data_dir / ".state.json"
             if state_path.is_file():
-                data = json.loads(state_path.read_text(encoding="utf-8"))
-                return data.get("model") or None
+                return json.loads(state_path.read_text(encoding="utf-8"))
         except Exception:
             pass
-        return None
+        return {}
 
     # -- /compact model helpers ------------------------------------------------
 
@@ -723,6 +725,7 @@ class AgentLoop:
         old_compact = current_compact
         self.compact_model = target
         self._compact_provider = self._providers[key]
+        self._persist_state()
         return f"Compact model switched: {old_compact} -> {target}"
 
     # -- end /model helpers ----------------------------------------------------

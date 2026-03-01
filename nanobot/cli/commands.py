@@ -304,9 +304,11 @@ def gateway(
     data_dir = get_data_dir()
     bus = MessageBus()
 
-    # Resolve model: --model flag > .state.json > config default
+    # Resolve model/compact_model: --model flag > .state.json > config default
+    persisted = AgentLoop.load_persisted_state(data_dir)
     if not model:
-        model = AgentLoop.load_persisted_model(data_dir) or config.agents.defaults.model
+        model = persisted.get("model") or config.agents.defaults.model
+    compact_model = persisted.get("compact_model") or config.agents.defaults.compact_model
 
     provider = _make_provider(config, model)
     session_manager = SessionManager(config.workspace_path)
@@ -331,7 +333,7 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
         mcp_servers=config.tools.mcp_servers,
-        compact_model=config.agents.defaults.compact_model,
+        compact_model=compact_model,
         channels_config=config.channels,
         provider_factory=lambda m: _make_provider(config, m),
         available_models=config.agents.defaults.models,
@@ -462,9 +464,11 @@ def agent(
     config = load_config()
     data_dir = get_data_dir()
 
-    # Resolve model: --model flag > .state.json > config default
+    # Resolve model/compact_model: --model flag > .state.json > config default
+    persisted = AgentLoop.load_persisted_state(data_dir)
     if not model:
-        model = AgentLoop.load_persisted_model(data_dir) or config.agents.defaults.model
+        model = persisted.get("model") or config.agents.defaults.model
+    compact_model = persisted.get("compact_model") or config.agents.defaults.compact_model
 
     bus = MessageBus()
     provider = _make_provider(config, model)
@@ -492,7 +496,7 @@ def agent(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
-        compact_model=config.agents.defaults.compact_model,
+        compact_model=compact_model,
         channels_config=config.channels,
         provider_factory=lambda m: _make_provider(config, m),
         available_models=config.agents.defaults.models,
