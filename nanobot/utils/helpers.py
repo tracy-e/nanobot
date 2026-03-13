@@ -64,6 +64,26 @@ def safe_filename(name: str) -> str:
     return name.strip()
 
 
+def split_message(content: str, max_len: int = 4000) -> list[str]:
+    """Split content into chunks within max_len, preferring line breaks."""
+    if not content or len(content) <= max_len:
+        return [content] if content else []
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        pos = cut.rfind('\n')
+        if pos == -1:
+            pos = cut.rfind(' ')
+        if pos == -1:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
+
+
 def parse_session_key(key: str) -> tuple[str, str]:
     """
     Parse a session key into channel and chat_id.

@@ -288,7 +288,8 @@ def gateway(
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
-    from nanobot.config.loader import get_data_dir, load_config
+    from nanobot.config.loader import load_config
+    from nanobot.config.paths import get_data_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
@@ -402,10 +403,12 @@ def gateway(
 
     heartbeat = HeartbeatService(
         workspace=config.workspace_path,
-        on_heartbeat=on_heartbeat,
+        provider=provider,
+        model=model,
+        on_execute=on_heartbeat,
         on_notify=on_heartbeat_notify,
         interval_s=30 * 60,  # 30 minutes
-        enabled=True
+        enabled=True,
     )
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
@@ -458,7 +461,8 @@ def agent(
 
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
-    from nanobot.config.loader import get_data_dir, load_config
+    from nanobot.config.loader import load_config
+    from nanobot.config.paths import get_data_dir
     from nanobot.cron.service import CronService
 
     config = load_config()
@@ -822,7 +826,7 @@ def cron_list(
     all: bool = typer.Option(False, "--all", "-a", help="Include disabled jobs"),
 ):
     """List scheduled jobs."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.paths import get_data_dir
     from nanobot.cron.service import CronService
 
     store_path = get_data_dir() / "cron" / "jobs.json"
@@ -883,7 +887,7 @@ def cron_add(
     channel: str = typer.Option(None, "--channel", help="Channel for delivery (e.g. 'telegram', 'whatsapp')"),
 ):
     """Add a scheduled job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.paths import get_data_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronSchedule
 
@@ -928,7 +932,7 @@ def cron_remove(
     job_id: str = typer.Argument(..., help="Job ID to remove"),
 ):
     """Remove a scheduled job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.paths import get_data_dir
     from nanobot.cron.service import CronService
 
     store_path = get_data_dir() / "cron" / "jobs.json"
@@ -946,7 +950,7 @@ def cron_enable(
     disable: bool = typer.Option(False, "--disable", help="Disable instead of enable"),
 ):
     """Enable or disable a job."""
-    from nanobot.config.loader import get_data_dir
+    from nanobot.config.paths import get_data_dir
     from nanobot.cron.service import CronService
 
     store_path = get_data_dir() / "cron" / "jobs.json"
@@ -967,7 +971,8 @@ def cron_run(
 ):
     """Manually run a job."""
     from loguru import logger
-    from nanobot.config.loader import load_config, get_data_dir
+    from nanobot.config.loader import load_config
+    from nanobot.config.paths import get_data_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.bus.queue import MessageBus

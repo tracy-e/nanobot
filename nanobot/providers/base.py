@@ -72,3 +72,48 @@ class LLMProvider(ABC):
     def set_session_key(self, key: str) -> None:
         """Set the current session key. Override in providers that need it."""
         pass
+
+    @staticmethod
+    def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Replace empty text content that causes provider 400 errors."""
+        result: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+
+            if isinstance(content, str) and not content:
+                clean = dict(msg)
+                clean["content"] = None if (msg.get("role") == "assistant" and msg.get("tool_calls")) else "(empty)"
+                result.append(clean)
+                continue
+
+            if isinstance(content, list):
+                filtered = [
+                    item for item in content
+                    if not (
+                        isinstance(item, dict)
+                        and item.get("type") == "text"
+                        and not item.get("text", "").strip()
+                    )
+                ]
+                if filtered != content:
+                    clean = dict(msg)
+                    clean["content"] = filtered if filtered else "(empty)"
+                    result.append(clean)
+                    continue
+
+            result.append(msg)
+        return result
+
+    @staticmethod
+    def _sanitize_request_messages(
+        messages: list[dict[str, Any]],
+        allowed_keys: frozenset[str],
+    ) -> list[dict[str, Any]]:
+        """Keep only provider-safe message keys and normalize assistant content."""
+        sanitized = []
+        for msg in messages:
+            clean = {k: v for k, v in msg.items() if k in allowed_keys}
+            if clean.get("role") == "assistant" and "content" not in clean:
+                clean["content"] = None
+            sanitized.append(clean)
+        return sanitized

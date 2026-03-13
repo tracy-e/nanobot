@@ -14,6 +14,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import TelegramConfig
+from nanobot.utils.helpers import split_message
 
 
 def _markdown_to_telegram_html(text: str) -> str:
@@ -79,24 +80,7 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
-def _split_message(content: str, max_len: int = 4000) -> list[str]:
-    """Split content into chunks within max_len, preferring line breaks."""
-    if len(content) <= max_len:
-        return [content]
-    chunks: list[str] = []
-    while content:
-        if len(content) <= max_len:
-            chunks.append(content)
-            break
-        cut = content[:max_len]
-        pos = cut.rfind('\n')
-        if pos == -1:
-            pos = cut.rfind(' ')
-        if pos == -1:
-            pos = max_len
-        chunks.append(content[:pos])
-        content = content[pos:].lstrip()
-    return chunks
+_split_message = split_message  # backward compat alias
 
 
 class TelegramChannel(BaseChannel):

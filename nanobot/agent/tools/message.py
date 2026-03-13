@@ -18,6 +18,7 @@ class MessageTool(Tool):
         self._send_callback = send_callback
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
+        self._sent_in_turn = False
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Set the current message context."""
@@ -27,6 +28,10 @@ class MessageTool(Tool):
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         """Set the callback for sending messages."""
         self._send_callback = callback
+
+    def start_turn(self) -> None:
+        """Reset per-turn state (called at the start of each agent turn)."""
+        self._sent_in_turn = False
 
     @property
     def name(self) -> str:
@@ -88,6 +93,7 @@ class MessageTool(Tool):
 
         try:
             await self._send_callback(msg)
+            self._sent_in_turn = True
             media_info = f" with {len(media)} attachments" if media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:
