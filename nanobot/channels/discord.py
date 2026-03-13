@@ -119,7 +119,9 @@ class DiscordChannel(BaseChannel):
                 if not await self._send_payload(url, headers, payload, files_to_send):
                     break  # Abort remaining chunks on failure
         finally:
-            await self._stop_typing(msg.chat_id)
+            is_progress = bool((msg.metadata or {}).get("_progress"))
+            if not is_progress:
+                await self._stop_typing(msg.chat_id)
 
     async def _send_payload(
         self,
