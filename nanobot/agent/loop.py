@@ -28,7 +28,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
 
@@ -54,7 +54,9 @@ class AgentLoop:
         temperature: float = 0.1,
         max_tokens: int = 4096,
         memory_window: int = 100,
-        brave_api_key: str | None = None,
+        context_window_tokens: int = 65_536,
+        web_search_config: WebSearchConfig | None = None,
+        web_proxy: str | None = None,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
@@ -66,7 +68,8 @@ class AgentLoop:
         available_models: list[str] | None = None,
         data_dir: Path | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.config.schema import ExecToolConfig, WebSearchConfig
+
         self.bus = bus
         self.channels_config = channels_config
         self.provider = provider
@@ -77,7 +80,9 @@ class AgentLoop:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.memory_window = memory_window
-        self.brave_api_key = brave_api_key
+        self.context_window_tokens = context_window_tokens
+        self.web_search_config = web_search_config or WebSearchConfig()
+        self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
@@ -110,7 +115,8 @@ class AgentLoop:
             model=self.model,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            brave_api_key=brave_api_key,
+            web_search_config=self.web_search_config,
+            web_proxy=web_proxy,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
         )
@@ -135,8 +141,8 @@ class AgentLoop:
             timeout=self.exec_config.timeout,
             restrict_to_workspace=self.restrict_to_workspace,
         ))
-        self.tools.register(WebSearchTool(api_key=self.brave_api_key))
-        self.tools.register(WebFetchTool())
+        self.tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
+        self.tools.register(WebFetchTool(proxy=self.web_proxy))
         self.tools.register(MessageTool(send_callback=self.bus.publish_outbound))
         self.tools.register(SpawnTool(manager=self.subagents))
         self.tools.register(MemorySearchTool(workspace=self.workspace))

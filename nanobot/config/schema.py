@@ -191,6 +191,7 @@ class AgentDefaults(Base):
     temperature: float = 0.7
     max_tool_iterations: int = 20
     memory_window: int = 50
+    context_window_tokens: int = 65_536
 
 
 class AgentsConfig(Base):
@@ -240,7 +241,9 @@ class GatewayConfig(Base):
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
-    api_key: str = ""  # Brave Search API key
+    provider: str = "brave"  # brave, tavily, duckduckgo, searxng, jina
+    api_key: str = ""
+    base_url: str = ""  # SearXNG base URL
     max_results: int = 5
 
 
@@ -248,6 +251,7 @@ class WebToolsConfig(Base):
     """Web tools configuration."""
 
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
+    proxy: str = ""  # HTTP proxy for web tools (search & fetch)
 
 
 class ExecToolConfig(Base):
