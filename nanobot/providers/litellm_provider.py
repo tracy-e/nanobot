@@ -1,7 +1,9 @@
 """LiteLLM provider implementation for multi-provider support."""
 
-import asyncio
+import hashlib
 import os
+import secrets
+import string
 from typing import Any
 
 import json_repair
@@ -12,26 +14,20 @@ from loguru import logger
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.providers.registry import find_by_model, find_gateway
 
-# Transient LiteLLM exceptions worth retrying (server-side / network issues).
-_RETRYABLE_EXCEPTIONS = (
-    litellm.InternalServerError,      # 500 — includes "Server disconnected"
-    litellm.ServiceUnavailableError,   # 503
-    litellm.APIConnectionError,        # Network-level failures
-    litellm.Timeout,                   # Request timeout
-)
+# Standard chat-completion message keys.
+_ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"})
+_ANTHROPIC_EXTRA_KEYS = frozenset({"thinking_blocks"})
+_ALNUM = string.ascii_letters + string.digits
 
-_MAX_RETRIES = 3
-_RETRY_BASE_DELAY = 1.0  # seconds, doubles each attempt
-
-
-# Standard OpenAI chat-completion message keys; extras (e.g. reasoning_content) are stripped for strict providers.
-_ALLOWED_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
+def _short_tool_id() -> str:
+    """Generate a 9-char alphanumeric ID compatible with all providers (incl. Mistral)."""
+    return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
-
+    
     Supports OpenRouter, Anthropic, OpenAI, Gemini, MiniMax, and many other providers through
     a unified interface.  Provider-specific logic is driven by the registry
     (see providers/registry.py) — no if-elif chains needed here.
@@ -54,17 +50,6 @@ class LiteLLMProvider(LLMProvider):
         # api_key / api_base are fallback for auto-detection.
         self._gateway = find_gateway(provider_name, api_key, api_base)
 
-        # Local providers (Ollama, vLLM): bypass system proxy for localhost.
-        # macOS system proxy may route 127.0.0.1 through a proxy, causing
-        # Python HTTP libraries to fail while curl works fine.
-        if self._gateway and self._gateway.is_local and api_base:
-            from urllib.parse import urlparse
-            host = urlparse(api_base).hostname or ""
-            no_proxy = os.environ.get("NO_PROXY", os.environ.get("no_proxy", ""))
-            if host not in no_proxy:
-                entries = [e for e in no_proxy.split(",") if e] + [host]
-                os.environ["NO_PROXY"] = ",".join(entries)
-
         # Configure environment variables
         if api_key:
             self._setup_env(api_key, api_base, default_model)
@@ -76,6 +61,8 @@ class LiteLLMProvider(LLMProvider):
         litellm.suppress_debug_info = True
         # Drop unsupported parameters for providers (e.g., gpt-5 rejects some params)
         litellm.drop_params = True
+
+        self._langsmith_enabled = bool(os.getenv("LANGSMITH_API_KEY"))
 
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
@@ -104,16 +91,10 @@ class LiteLLMProvider(LLMProvider):
     def _resolve_model(self, model: str) -> str:
         """Resolve model name by applying provider/gateway prefixes."""
         if self._gateway:
-            # Gateway mode: apply gateway prefix, skip provider-specific prefixes
             prefix = self._gateway.litellm_prefix
-            # Strip user-facing prefix (e.g. "vllm/") before adding litellm
-            # prefix (e.g. "hosted_vllm/") to avoid double-prefixing.
-            user_prefix = f"{self._gateway.name}/"
-            if model.startswith(user_prefix):
-                model = model[len(user_prefix):]
-            elif self._gateway.strip_model_prefix:
+            if self._gateway.strip_model_prefix:
                 model = model.split("/")[-1]
-            if prefix and not model.startswith(f"{prefix}/"):
+            if prefix:
                 model = f"{prefix}/{model}"
             return model
 
@@ -148,42 +129,20 @@ class LiteLLMProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-        """Return copies of messages and tools with cache_control injected.
-
-        Cache breakpoints (up to 4 allowed by Anthropic):
-        1. System message — stable across turns for high cache hit rate.
-        2. Last tool definition — semi-stable, changes only when tools change.
-        3. Penultimate message (second-to-last) — caches the conversation
-           history so only the latest user turn is uncached.
-        """
-        new_messages = list(messages)
-
-        # Breakpoint 1: last system message — caches ALL system content
-        last_sys_idx = None
-        for i, msg in enumerate(new_messages):
+        """Return copies of messages and tools with cache_control injected."""
+        new_messages = []
+        for msg in messages:
             if msg.get("role") == "system":
-                last_sys_idx = i
-        if last_sys_idx is not None:
-            msg = new_messages[last_sys_idx]
-            content = msg["content"]
-            if isinstance(content, str):
-                new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                content = msg["content"]
+                if isinstance(content, str):
+                    new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                else:
+                    new_content = list(content)
+                    new_content[-1] = {**new_content[-1], "cache_control": {"type": "ephemeral"}}
+                new_messages.append({**msg, "content": new_content})
             else:
-                new_content = list(content)
-                new_content[-1] = {**new_content[-1], "cache_control": {"type": "ephemeral"}}
-            new_messages[last_sys_idx] = {**msg, "content": new_content}
+                new_messages.append(msg)
 
-        # Breakpoint 3: penultimate message — caches conversation history
-        # (the last message is the new user turn which changes every time)
-        if len(new_messages) >= 3:
-            idx = len(new_messages) - 2
-            penultimate = new_messages[idx]
-            content = penultimate.get("content")
-            if isinstance(content, str) and content:
-                new_content = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-                new_messages[idx] = {**penultimate, "content": new_content}
-
-        # Breakpoint 2: last tool definition
         new_tools = tools
         if tools:
             new_tools = list(tools)
@@ -202,15 +161,50 @@ class LiteLLMProvider(LLMProvider):
                     return
 
     @staticmethod
-    def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _extra_msg_keys(original_model: str, resolved_model: str) -> frozenset[str]:
+        """Return provider-specific extra keys to preserve in request messages."""
+        spec = find_by_model(original_model) or find_by_model(resolved_model)
+        if (spec and spec.name == "anthropic") or "claude" in original_model.lower() or resolved_model.startswith("anthropic/"):
+            return _ANTHROPIC_EXTRA_KEYS
+        return frozenset()
+
+    @staticmethod
+    def _normalize_tool_call_id(tool_call_id: Any) -> Any:
+        """Normalize tool_call_id to a provider-safe 9-char alphanumeric form."""
+        if not isinstance(tool_call_id, str):
+            return tool_call_id
+        if len(tool_call_id) == 9 and tool_call_id.isalnum():
+            return tool_call_id
+        return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
+
+    @staticmethod
+    def _sanitize_messages(messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
         """Strip non-standard keys and ensure assistant messages have a content key."""
-        sanitized = []
-        for msg in messages:
-            clean = {k: v for k, v in msg.items() if k in _ALLOWED_MSG_KEYS}
-            # Strict providers require "content" even when assistant only has tool_calls
-            if clean.get("role") == "assistant" and "content" not in clean:
-                clean["content"] = None
-            sanitized.append(clean)
+        allowed = _ALLOWED_MSG_KEYS | extra_keys
+        sanitized = LLMProvider._sanitize_request_messages(messages, allowed)
+        id_map: dict[str, str] = {}
+
+        def map_id(value: Any) -> Any:
+            if not isinstance(value, str):
+                return value
+            return id_map.setdefault(value, LiteLLMProvider._normalize_tool_call_id(value))
+
+        for clean in sanitized:
+            # Keep assistant tool_calls[].id and tool tool_call_id in sync after
+            # shortening, otherwise strict providers reject the broken linkage.
+            if isinstance(clean.get("tool_calls"), list):
+                normalized_tool_calls = []
+                for tc in clean["tool_calls"]:
+                    if not isinstance(tc, dict):
+                        normalized_tool_calls.append(tc)
+                        continue
+                    tc_clean = dict(tc)
+                    tc_clean["id"] = map_id(tc_clean.get("id"))
+                    normalized_tool_calls.append(tc_clean)
+                clean["tool_calls"] = normalized_tool_calls
+
+            if "tool_call_id" in clean and clean["tool_call_id"]:
+                clean["tool_call_id"] = map_id(clean["tool_call_id"])
         return sanitized
 
     async def chat(
@@ -220,6 +214,8 @@ class LiteLLMProvider(LLMProvider):
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -236,6 +232,7 @@ class LiteLLMProvider(LLMProvider):
         """
         original_model = model or self.default_model
         model = self._resolve_model(original_model)
+        extra_msg_keys = self._extra_msg_keys(original_model, model)
 
         if self._supports_cache_control(original_model):
             messages, tools = self._apply_cache_control(messages, tools)
@@ -246,13 +243,19 @@ class LiteLLMProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages)),
+            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
 
+        if self._gateway:
+            kwargs.update(self._gateway.litellm_kwargs)
+
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
         self._apply_model_overrides(model, kwargs)
+
+        if self._langsmith_enabled:
+            kwargs.setdefault("callbacks", []).append("langsmith")
 
         # Pass api_key directly — more reliable than env vars alone
         if self.api_key:
@@ -265,77 +268,86 @@ class LiteLLMProvider(LLMProvider):
         # Pass extra headers (e.g. APP-Code for AiHubMix)
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
-
+        
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs["drop_params"] = True
+        
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice or "auto"
 
-        last_exc: Exception | None = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                response = await acompletion(**kwargs)
-                return self._parse_response(response)
-            except _RETRYABLE_EXCEPTIONS as e:
-                last_exc = e
-                delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                logger.warning(
-                    "LLM transient error (attempt {}/{}): {} — retrying in {:.0f}s",
-                    attempt + 1, _MAX_RETRIES, e, delay,
-                )
-                await asyncio.sleep(delay)
-            except Exception as e:
-                # Non-retryable error — return immediately
-                return LLMResponse(
-                    content=f"Error calling LLM: {str(e)}",
-                    finish_reason="error",
-                )
-
-        # All retries exhausted
-        return LLMResponse(
-            content=f"Error calling LLM (after {_MAX_RETRIES} retries): {last_exc}",
-            finish_reason="error",
-        )
+        try:
+            response = await acompletion(**kwargs)
+            return self._parse_response(response)
+        except Exception as e:
+            # Return error as content for graceful handling
+            return LLMResponse(
+                content=f"Error calling LLM: {str(e)}",
+                finish_reason="error",
+            )
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
         choice = response.choices[0]
         message = choice.message
+        content = message.content
+        finish_reason = choice.finish_reason
+
+        # Some providers (e.g. GitHub Copilot) split content and tool_calls
+        # across multiple choices. Merge them so tool_calls are not lost.
+        raw_tool_calls = []
+        for ch in response.choices:
+            msg = ch.message
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                raw_tool_calls.extend(msg.tool_calls)
+                if ch.finish_reason in ("tool_calls", "stop"):
+                    finish_reason = ch.finish_reason
+            if not content and msg.content:
+                content = msg.content
+
+        if len(response.choices) > 1:
+            logger.debug("LiteLLM response has {} choices, merged {} tool_calls",
+                         len(response.choices), len(raw_tool_calls))
 
         tool_calls = []
-        if hasattr(message, "tool_calls") and message.tool_calls:
-            for tc in message.tool_calls:
-                # Parse arguments from JSON string if needed
-                args = tc.function.arguments
-                if isinstance(args, str):
-                    args = json_repair.loads(args)
+        for tc in raw_tool_calls:
+            # Parse arguments from JSON string if needed
+            args = tc.function.arguments
+            if isinstance(args, str):
+                args = json_repair.loads(args)
 
-                tool_calls.append(ToolCallRequest(
-                    id=tc.id,
-                    name=tc.function.name,
-                    arguments=args,
-                ))
+            provider_specific_fields = getattr(tc, "provider_specific_fields", None) or None
+            function_provider_specific_fields = (
+                getattr(tc.function, "provider_specific_fields", None) or None
+            )
+
+            tool_calls.append(ToolCallRequest(
+                id=_short_tool_id(),
+                name=tc.function.name,
+                arguments=args,
+                provider_specific_fields=provider_specific_fields,
+                function_provider_specific_fields=function_provider_specific_fields,
+            ))
 
         usage = {}
         if hasattr(response, "usage") and response.usage:
-            u = response.usage
             usage = {
-                "prompt_tokens": u.prompt_tokens,
-                "completion_tokens": u.completion_tokens,
-                "total_tokens": u.total_tokens,
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
             }
-            # Anthropic cache metrics
-            for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
-                val = getattr(u, key, None)
-                if val is not None:
-                    usage[key] = val
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
+        thinking_blocks = getattr(message, "thinking_blocks", None) or None
+
         return LLMResponse(
-            content=message.content,
+            content=content,
             tool_calls=tool_calls,
-            finish_reason=choice.finish_reason or "stop",
+            finish_reason=finish_reason or "stop",
             usage=usage,
             reasoning_content=reasoning_content,
+            thinking_blocks=thinking_blocks,
         )
 
     def get_default_model(self) -> str:
