@@ -353,13 +353,17 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr("nanobot.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config: object())
+    monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config, _model=None: object())
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: object())
     monkeypatch.setattr("nanobot.cron.service.CronService", lambda _store: object())
 
     class _FakeAgentLoop:
         def __init__(self, *args, **kwargs) -> None:
             pass
+
+        @staticmethod
+        def load_persisted_state(data_dir):
+            return {}
 
         async def process_direct(self, *_args, **_kwargs) -> str:
             return "ok"
@@ -434,7 +438,7 @@ def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Pa
     )
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config, _model=None: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
@@ -462,7 +466,7 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
     )
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config, _model=None: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
     result = runner.invoke(
@@ -488,7 +492,7 @@ def test_gateway_warns_about_deprecated_memory_window(monkeypatch, tmp_path: Pat
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config, _model=None: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
@@ -510,7 +514,7 @@ def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Pat
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
     monkeypatch.setattr("nanobot.config.paths.get_cron_dir", lambda: config_file.parent / "cron")
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
-    monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config: object())
+    monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config, _model=None: object())
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: object())
     monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: object())
 
@@ -540,7 +544,7 @@ def test_gateway_uses_configured_port_when_cli_flag_is_missing(monkeypatch, tmp_
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config, _model=None: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
@@ -562,7 +566,7 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config, _model=None: (_ for _ in ()).throw(_StopGateway("stop")),
     )
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file), "--port", "18792"])

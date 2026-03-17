@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -20,6 +21,8 @@ class BaseChannel(ABC):
     """
 
     name: str = "base"
+    display_name: str = "Base"
+    transcription_api_key: str = ""
 
     def __init__(self, config: Any, bus: MessageBus):
         """
@@ -32,6 +35,19 @@ class BaseChannel(ABC):
         self.config = config
         self.bus = bus
         self._running = False
+
+    async def transcribe_audio(self, file_path: str | Path) -> str:
+        """Transcribe an audio file via Groq Whisper. Returns empty string on failure."""
+        if not self.transcription_api_key:
+            return ""
+        try:
+            from nanobot.providers.transcription import GroqTranscriptionProvider
+
+            provider = GroqTranscriptionProvider(api_key=self.transcription_api_key)
+            return await provider.transcribe(file_path)
+        except Exception as e:
+            logger.warning("{}: audio transcription failed: {}", self.name, e)
+            return ""
 
     @abstractmethod
     async def start(self) -> None:
@@ -61,29 +77,14 @@ class BaseChannel(ABC):
         pass
 
     def is_allowed(self, sender_id: str) -> bool:
-        """
-        Check if a sender is allowed to use this bot.
-
-        Args:
-            sender_id: The sender's identifier.
-
-        Returns:
-            True if allowed, False otherwise.
-        """
+        """Check if *sender_id* is permitted.  Empty list → deny all; ``"*"`` → allow all."""
         allow_list = getattr(self.config, "allow_from", [])
-
-        # If no allow list, allow everyone
         if not allow_list:
+            logger.warning("{}: allow_from is empty — all access denied", self.name)
+            return False
+        if "*" in allow_list:
             return True
-
-        sender_str = str(sender_id)
-        if sender_str in allow_list:
-            return True
-        if "|" in sender_str:
-            for part in sender_str.split("|"):
-                if part and part in allow_list:
-                    return True
-        return False
+        return str(sender_id) in allow_list
 
     async def _handle_message(
         self,
@@ -91,7 +92,8 @@ class BaseChannel(ABC):
         chat_id: str,
         content: str,
         media: list[str] | None = None,
-        metadata: dict[str, Any] | None = None
+        metadata: dict[str, Any] | None = None,
+        session_key: str | None = None,
     ) -> None:
         """
         Handle an incoming message from the chat platform.
@@ -104,6 +106,7 @@ class BaseChannel(ABC):
             content: Message text content.
             media: Optional list of media URLs.
             metadata: Optional channel-specific metadata.
+            session_key: Optional session key override (e.g. thread-scoped sessions).
         """
         if not self.is_allowed(sender_id):
             logger.warning(
@@ -119,7 +122,8 @@ class BaseChannel(ABC):
             chat_id=str(chat_id),
             content=content,
             media=media or [],
-            metadata=metadata or {}
+            metadata=metadata or {},
+            session_key_override=session_key,
         )
 
         await self.bus.publish_inbound(msg)

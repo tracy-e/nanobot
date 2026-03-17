@@ -55,7 +55,7 @@ def test_save_config_writes_context_window_tokens_but_not_memory_window(tmp_path
 
     assert defaults["maxTokens"] == 2222
     assert defaults["contextWindowTokens"] == 65_536
-    assert "memoryWindow" not in defaults
+    assert defaults["memoryWindow"] == 30
 
 
 def test_onboard_refresh_rewrites_legacy_config_template(tmp_path, monkeypatch) -> None:
@@ -86,7 +86,7 @@ def test_onboard_refresh_rewrites_legacy_config_template(tmp_path, monkeypatch) 
     defaults = saved["agents"]["defaults"]
     assert defaults["maxTokens"] == 3333
     assert defaults["contextWindowTokens"] == 65_536
-    assert "memoryWindow" not in defaults
+    assert defaults["memoryWindow"] == 50
 
 
 def test_onboard_refresh_backfills_missing_channel_fields(tmp_path, monkeypatch) -> None:

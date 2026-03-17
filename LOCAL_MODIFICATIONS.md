@@ -168,17 +168,7 @@ async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
 
 ---
 
-## 8. Tool Result 截断限制
-
-```python
-_TOOL_RESULT_MAX_CHARS = 500  # 本地: 500，上游: 16_000
-```
-
-保留较小值以节省 token 和存储。
-
----
-
-## 9. Claude OAuth Provider (本地独有文件)
+## 8. Claude OAuth Provider (本地独有文件)
 
 | 文件 | 说明 |
 |------|------|
