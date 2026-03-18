@@ -87,6 +87,7 @@ class LLMProvider(ABC):
         "timed out",
         "connection",
         "server error",
+        "system error",
         "temporarily unavailable",
     )
     _IMAGE_UNSUPPORTED_MARKERS = (
