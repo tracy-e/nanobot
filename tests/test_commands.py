@@ -409,13 +409,14 @@ def test_agent_workspace_override_wins_over_config_workspace(mock_agent_runtime,
 
 
 def test_agent_warns_about_deprecated_memory_window(mock_agent_runtime):
+    # In this fork, memory_window is an active field (not deprecated),
+    # so no warning is emitted. Just verify the value is accepted.
     mock_agent_runtime["config"].agents.defaults.memory_window = 100
 
     result = runner.invoke(app, ["agent", "-m", "hello"])
 
     assert result.exit_code == 0
-    assert "memoryWindow" in result.stdout
-    assert "contextWindowTokens" in result.stdout
+    assert "memoryWindow" not in result.stdout
 
 
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -498,8 +499,8 @@ def test_gateway_warns_about_deprecated_memory_window(monkeypatch, tmp_path: Pat
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
 
     assert isinstance(result.exception, _StopGateway)
-    assert "memoryWindow" in result.stdout
-    assert "contextWindowTokens" in result.stdout
+    # In this fork, memory_window is an active field — no deprecation warning.
+    assert "memoryWindow" not in result.stdout
 
 def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "instance" / "config.json"

@@ -40,6 +40,7 @@ class SlackConfig(Base):
     user_token_read_only: bool = True
     reply_in_thread: bool = True
     react_emoji: str = "eyes"
+    done_emoji: str = "white_check_mark"
     allow_from: list[str] = Field(default_factory=list)
     group_policy: str = "mention"
     group_allow_from: list[str] = Field(default_factory=list)
@@ -116,13 +117,32 @@ class SlackChannel(BaseChannel):
             slack_meta = msg.metadata.get("slack", {}) if msg.metadata else {}
             thread_ts = slack_meta.get("thread_ts")
             channel_type = slack_meta.get("channel_type")
-            # Only reply in thread for channel/group messages; DMs don't use threads
-            use_thread = thread_ts and channel_type != "im"
-            await self._web_client.chat_postMessage(
-                channel=msg.chat_id,
-                text=self._to_mrkdwn(msg.content),
-                thread_ts=thread_ts if use_thread else None,
-            )
+            # Slack DMs don't use threads; channel/group replies may keep thread_ts.
+            thread_ts_param = thread_ts if thread_ts and channel_type != "im" else None
+
+            # Slack rejects empty text payloads. Keep media-only messages media-only,
+            # but send a single blank message when the bot has no text or files to send.
+            if msg.content or not (msg.media or []):
+                await self._web_client.chat_postMessage(
+                    channel=msg.chat_id,
+                    text=self._to_mrkdwn(msg.content) if msg.content else " ",
+                    thread_ts=thread_ts_param,
+                )
+
+            for media_path in msg.media or []:
+                try:
+                    await self._web_client.files_upload_v2(
+                        channel=msg.chat_id,
+                        file=media_path,
+                        thread_ts=thread_ts_param,
+                    )
+                except Exception as e:
+                    logger.error("Failed to upload file {}: {}", media_path, e)
+
+            # Update reaction emoji when the final (non-progress) response is sent
+            if not (msg.metadata or {}).get("_progress"):
+                event = slack_meta.get("event", {})
+                await self._update_react_emoji(msg.chat_id, event.get("ts"))
         except Exception as e:
             logger.error(f"Error sending Slack message: {e}")
 
@@ -212,6 +232,28 @@ class SlackChannel(BaseChannel):
                 }
             },
         )
+
+    async def _update_react_emoji(self, chat_id: str, ts: str | None) -> None:
+        """Remove the in-progress reaction and optionally add a done reaction."""
+        if not self._web_client or not ts:
+            return
+        try:
+            await self._web_client.reactions_remove(
+                channel=chat_id,
+                name=self.config.react_emoji,
+                timestamp=ts,
+            )
+        except Exception as e:
+            logger.debug("Slack reactions_remove failed: {}", e)
+        if self.config.done_emoji:
+            try:
+                await self._web_client.reactions_add(
+                    channel=chat_id,
+                    name=self.config.done_emoji,
+                    timestamp=ts,
+                )
+            except Exception as e:
+                logger.debug("Slack done reaction failed: {}", e)
 
     def _is_allowed(self, sender_id: str, chat_id: str, channel_type: str) -> bool:
         if channel_type == "im":

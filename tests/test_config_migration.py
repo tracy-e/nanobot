@@ -29,7 +29,9 @@ def test_load_config_keeps_max_tokens_and_warns_on_legacy_memory_window(tmp_path
 
     assert config.agents.defaults.max_tokens == 1234
     assert config.agents.defaults.context_window_tokens == 65_536
-    assert config.agents.defaults.should_warn_deprecated_memory_window is True
+    # In this fork, memory_window is an active field — never deprecated.
+    assert config.agents.defaults.should_warn_deprecated_memory_window is False
+    assert config.agents.defaults.memory_window == 42
 
 
 def test_save_config_writes_context_window_tokens_but_not_memory_window(tmp_path) -> None:

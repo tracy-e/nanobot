@@ -93,7 +93,10 @@ class MessageTool(Tool):
 
         try:
             await self._send_callback(msg)
-            self._sent_in_turn = True
+            # Only suppress the final agent response when the message was
+            # sent to the *same* channel/chat that originated the request.
+            if channel == self._default_channel and chat_id == self._default_chat_id:
+                self._sent_in_turn = True
             media_info = f" with {len(media)} attachments" if media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:
