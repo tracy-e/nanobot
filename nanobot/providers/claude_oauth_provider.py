@@ -107,6 +107,7 @@ class ClaudeOAuthProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
         token = self._get_token()
 
@@ -141,7 +142,7 @@ class ClaudeOAuthProvider(LLMProvider):
 
         if tools:
             kwargs["tools"] = self._remap_tools(tools)
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice or "auto"
 
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort

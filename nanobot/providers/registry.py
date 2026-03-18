@@ -220,6 +220,18 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     ),
 
 
+    # Claude OAuth: uses Claude Code's OAuth token from macOS Keychain.
+    # Not a LiteLLM provider — uses ClaudeOAuthProvider directly.
+    ProviderSpec(
+        name="claude_oauth",
+        keywords=("claude-oauth",),
+        env_key="",
+        display_name="Claude OAuth",
+        litellm_prefix="",
+        is_oauth=True,
+        is_direct=True,
+    ),
+
     # === Standard providers (matched by model-name keywords) ===============
     # Anthropic: LiteLLM recognizes "claude-*" natively, no prefix needed.
     ProviderSpec(

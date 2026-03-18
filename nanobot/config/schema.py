@@ -46,8 +46,8 @@ class AgentDefaults(Base):
 
     @property
     def should_warn_deprecated_memory_window(self) -> bool:
-        """Return True when old memoryWindow is present without contextWindowTokens."""
-        return self.memory_window is not None and "context_window_tokens" not in self.model_fields_set
+        """memory_window is an active field in this fork, never warn."""
+        return False
 
 
 class AgentsConfig(Base):

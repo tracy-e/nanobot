@@ -371,6 +371,19 @@ def _make_provider(config: Config, model: str | None = None):
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
 
+    # Claude OAuth (reuse Claude Code OAuth token)
+    if provider_name == "claude_oauth" or model.startswith("claude-oauth/"):
+        from nanobot.providers.claude_oauth_provider import ClaudeOAuthProvider
+        actual_model = model.split("/", 1)[1] if "/" in model else model
+        provider = ClaudeOAuthProvider(model=actual_model)
+        defaults = config.agents.defaults
+        provider.generation = GenerationSettings(
+            temperature=defaults.temperature,
+            max_tokens=defaults.max_tokens,
+            reasoning_effort=defaults.reasoning_effort,
+        )
+        return provider
+
     # OpenAI Codex (OAuth)
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
         provider = OpenAICodexProvider(default_model=model)
