@@ -2,29 +2,39 @@
 
 > 本文档记录所有相对于上游 `HKUDS/nanobot` 的本地修改。
 > 合并上游更新时，以此文档为准恢复本地功能。
-> 最后更新：2026-03-17，基于 merge commit `33efc0f` + fixes
+> 最后更新：2026-03-24，基于 merge commit with origin/main (`1d58c9b`)
 
 ---
 
-## 1. 斜杠命令系统 (`nanobot/agent/loop.py`)
+## 1. 斜杠命令系统 (`nanobot/command/builtin.py` + `nanobot/agent/loop.py`)
 
-### 命令列表
+上游已引入 CommandRouter 模式 (`nanobot/command/router.py`)，本地命令已迁移到此框架。
+
+### 上游内置命令
 
 | 命令 | 功能 | 实现位置 |
 |------|------|----------|
-| `/new` | 开始新对话，归档当前会话 | `_process_message()` |
-| `/clear` | 清除对话历史（不归档） | `_process_message()` |
-| `/compact [--switch] [model]` | 压缩对话 / 切换 compact model | `_process_message()` + `_switch_compact_model()` |
-| `/skills` | 列出 workspace 可用技能 | `_list_skills()` |
-| `/model [number\|name]` | 显示/切换当前模型 | `_format_model_list()` + `_switch_model()` |
-| `/mcp` | 列出 MCP 服务器及连接状态 | `_list_mcp_servers()` |
-| `/help` | 显示所有命令帮助（含 /stop, /restart） | `_process_message()` |
+| `/new` | 开始新对话，归档当前会话 | `builtin.py::cmd_new` |
+| `/stop` | 停止当前任务 | `builtin.py::cmd_stop` |
+| `/restart` | 重启 bot | `builtin.py::cmd_restart` |
+| `/status` | 显示运行状态 | `builtin.py::cmd_status` |
+| `/help` | 显示可用命令 | `builtin.py::cmd_help` |
+
+### 本地新增命令（注册在 `builtin.py::register_builtin_commands`）
+
+| 命令 | 功能 | 实现位置 |
+|------|------|----------|
+| `/clear` | 清除对话历史（不归档） | `builtin.py::cmd_clear` |
+| `/compact [--switch] [model]` | 压缩对话 / 切换 compact model | `builtin.py::cmd_compact` |
+| `/skills` | 列出 workspace 可用技能 | `builtin.py::cmd_skills` |
+| `/model [number\|name]` | 显示/切换当前模型 | `builtin.py::cmd_model` |
+| `/mcp` | 列出 MCP 服务器及连接状态 | `builtin.py::cmd_mcp` |
 
 ### 关键实现细节
 
 - `/model` 支持序号、名称、模糊匹配三种方式
-- 进度消息 `_bus_progress` 直接 `return` 抑制所有进度到 channel
-- `/stop` 和 `/restart` 由上游 `run()` 方法处理（保留上游实现）
+- `/help` 已更新包含所有本地命令
+- helper 方法仍在 `loop.py` 中：`_list_skills`, `_list_mcp_servers`, `_format_model_list`, `_switch_model` 等
 
 ---
 
@@ -41,7 +51,7 @@ def __init__(self, ...,
 )
 ```
 
-### 新增方法
+### 新增方法（在 `loop.py`）
 
 | 方法 | 用途 |
 |------|------|
@@ -78,10 +88,16 @@ def __init__(self, ...,
 | `nanobot/providers/claude_oauth_provider.py` | 复用 Claude Code OAuth token |
 | `nanobot/providers/claude_oauth_auth.py` | OAuth token 发现和刷新 |
 
+### 关键实现
+
+- `_fix_trailing_assistant()` — 将尾部 assistant 消息转为 user role（OAuth 端点不支持 assistant prefill）
+- `_ensure_system_prefix()` — 确保 Claude Code system prefix 存在
+
 ### 注册位置
 
-- `nanobot/providers/registry.py` — `ProviderSpec(name="claude_oauth", keywords=("claude-oauth",), is_oauth=True, is_direct=True)`
-- `nanobot/cli/commands.py` — `_make_provider()` 中 `claude_oauth` 分支，创建 `ClaudeOAuthProvider`
+- `nanobot/providers/registry.py` — `ProviderSpec(name="claude_oauth", ...)`
+- `nanobot/providers/__init__.py` — lazy-import 中包含 `ClaudeOAuthProvider`
+- `nanobot/cli/commands.py` — `_make_provider()` 中 `claude_oauth` 分支
 
 ---
 
@@ -117,12 +133,12 @@ AgentLoop(
 ```python
 models: list[str] = []        # /model 可切换的模型列表
 compact_model: str = ""       # compact/consolidation 用的模型
-memory_window: int = 50       # 上游标记为 deprecated，本地保留为 active 字段
+memory_window: int = 50       # 上游已移除 (deprecated)，本地保留为 active 字段
 ```
 
 ### `should_warn_deprecated_memory_window`
 
-上游用于警告 deprecated `memoryWindow`，本地改为永远返回 `False`（因为 `memory_window` 是 active 字段）。
+上游已移除 `memory_window` 字段，本地保留并让 `should_warn_deprecated_memory_window` 永远返回 `False`。
 
 ### SubagentConfig
 
@@ -146,11 +162,15 @@ async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
     return  # Suppress all progress messages to channels
 ```
 
-上游方案是通过 metadata 标记推送到 bus，channel 端决定是否显示。
+---
+
+## 8. Provider registry (`nanobot/providers/registry.py`)
+
+- Ollama provider: `strip_model_prefix=True`（上游为 `False`），使 `ollama/model` 正确路由
 
 ---
 
-## 8. 辅助脚本 (本地独有文件)
+## 9. 辅助脚本 (本地独有文件)
 
 | 文件 | 说明 |
 |------|------|
@@ -163,12 +183,13 @@ async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
 
 合并上游时，对于冲突文件：
 
-1. **loop.py** — 接受上游框架（MemoryConsolidator、_dispatch 等），重新添加斜杠命令和 /model 切换方法
-2. **commands.py** — 接受上游重构，补回 `_make_provider` 的 model 参数、claude_oauth 分支、provider_factory 传递、state 恢复
-3. **memory.py** — 接受上游的 MemoryConsolidator（token-based）
+1. **loop.py** — 接受上游框架（CommandRouter、streaming、并发锁等），保留 helper 方法（_switch_model 等）
+2. **command/builtin.py** — 接受上游基础命令，补回本地 /clear, /compact, /skills, /model, /mcp，更新 /help 列表
+3. **commands.py** — 接受上游重构，补回 `_make_provider` 的 model 参数、claude_oauth 分支、provider_factory 传递、state 恢复
 4. **schema.py** — 接受上游重构，补回 models / compact_model / SubagentConfig / memory_window (active)
-5. **registry.py** — 接受上游，补回 claude_oauth ProviderSpec
-6. **base.py / litellm_provider.py** — 接受上游（GenerationSettings / chat_with_retry）
+5. **providers/registry.py** — 接受上游新 provider，补回 claude_oauth ProviderSpec + ollama strip_prefix
+6. **providers/__init__.py** — 接受上游 lazy-import，补回 ClaudeOAuthProvider
 7. **memory_tool.py / claude_oauth_*.py** — 本地独有文件，直接保留
-8. **tests/test_commands.py** — `_make_provider` mock 需要加 `_model=None` 参数；`_FakeAgentLoop` 需要 `load_persisted_state` 静态方法
-9. **tests/test_config_migration.py** — `memoryWindow` 断言需要改为检查值存在（非 deprecated）
+8. **tests/test_commands.py** — `_make_provider` mock 需要加 `_model=None` 参数；`_FakeAgentLoop` 需要 `load_persisted_state`
+9. **tests/test_config_migration.py** — `memoryWindow` 断言保留 active（非 deprecated）
+10. **tests/test_providers_init.py** — `__all__` 断言需包含 `ClaudeOAuthProvider`
