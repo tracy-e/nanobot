@@ -119,6 +119,10 @@ class ClaudeOAuthProvider(LLMProvider):
         # Ensure the Claude Code system prefix is present
         messages = self._ensure_system_prefix(messages)
 
+        # OAuth endpoint does not support assistant message prefill —
+        # the conversation must end with a user message.
+        messages = self._fix_trailing_assistant(messages)
+
         kwargs: dict[str, Any] = {
             "model": f"anthropic/{resolved_model}",
             "messages": messages,
@@ -301,6 +305,25 @@ class ClaudeOAuthProvider(LLMProvider):
     # ------------------------------------------------------------------
     # Message preparation
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fix_trailing_assistant(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert a trailing assistant message to user role.
+
+        The OAuth endpoint rejects assistant-prefill (conversation ending
+        with an assistant message).  This happens when subagent results
+        are injected as assistant-role messages.  Re-label the last
+        message so the API accepts it.
+        """
+        if not messages:
+            return messages
+        last = messages[-1]
+        if last.get("role") == "assistant":
+            messages = list(messages)
+            messages[-1] = {**last, "role": "user"}
+        return messages
 
     def _ensure_system_prefix(
         self, messages: list[dict[str, Any]]
