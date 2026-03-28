@@ -116,16 +116,42 @@ class ClaudeOAuthProvider(AnthropicProvider):
             messages[-1] = {**last, "role": "user"}
         return messages
 
-    def _ensure_system_prefix(
+    def _rewrite_system_for_oauth(
         self, messages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Ensure the Claude Code system prefix is present."""
+        """Rewrite system messages for OAuth endpoint compatibility.
+
+        The OAuth endpoint requires system to be EXACTLY the Claude Code prefix
+        string — no extra content, no list format. Any custom system content
+        (e.g. nanobot context) is moved into a user message instead.
+        """
+        messages = list(messages)
+        extra_system_parts: list[str] = []
+
+        # Extract and remove all system messages, collecting their content
+        filtered: list[dict[str, Any]] = []
         for msg in messages:
             if msg.get("role") == "system":
                 content = msg.get("content", "")
-                if isinstance(content, str) and content.startswith(self.REQUIRED_SYSTEM_PREFIX):
-                    return messages
-        return [{"role": "system", "content": self.REQUIRED_SYSTEM_PREFIX}] + list(messages)
+                if isinstance(content, str) and content.strip():
+                    # Strip the Claude Code prefix if already present
+                    text = content
+                    if text.startswith(self.REQUIRED_SYSTEM_PREFIX):
+                        text = text[len(self.REQUIRED_SYSTEM_PREFIX):].strip()
+                    if text:
+                        extra_system_parts.append(text)
+            else:
+                filtered.append(msg)
+
+        # Re-add the exact required system message
+        result = [{"role": "system", "content": self.REQUIRED_SYSTEM_PREFIX}]
+
+        # Inject extra system content as a user message before the conversation
+        if extra_system_parts:
+            result.append({"role": "user", "content": "\n\n".join(extra_system_parts)})
+
+        result.extend(filtered)
+        return result
 
     # ------------------------------------------------------------------
     # Override _build_kwargs to inject OAuth auth + preprocessing
@@ -147,13 +173,14 @@ class ClaudeOAuthProvider(AnthropicProvider):
             model = model.split("/", 1)[1]
 
         # OAuth-specific message preprocessing
-        messages = self._ensure_system_prefix(messages)
+        messages = self._rewrite_system_for_oauth(messages)
         messages = self._fix_trailing_assistant(messages)
 
-        # Build kwargs via parent (handles Anthropic message conversion, caching, etc.)
+        # Build kwargs via parent (handles Anthropic message conversion, etc.)
+        # Disable prompt caching — OAuth endpoint rejects list-format system.
         kwargs = super()._build_kwargs(
             messages, tools, model, max_tokens, temperature,
-            reasoning_effort, tool_choice, supports_caching,
+            reasoning_effort, tool_choice, supports_caching=False,
         )
 
         # Refresh token if needed (updates self._client.auth_token)
