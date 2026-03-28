@@ -113,13 +113,42 @@ async def cmd_mcp(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_compact(ctx: CommandContext) -> OutboundMessage:
+    """Compact conversation or switch compact model."""
+    loop = ctx.loop
+    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    arg = ctx.args.strip() if ctx.args else ""
+    if arg == "--switch":
+        content = loop._format_compact_model_list()
+    elif arg:
+        content = loop._switch_compact_model(arg)
+    else:
+        snapshot = session.messages[session.last_consolidated:]
+        if snapshot:
+            loop._schedule_background(loop.memory_consolidator.archive_messages(snapshot))
+        content = "Conversation compacted."
+    return OutboundMessage(channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=content)
+
+
+async def cmd_model(ctx: CommandContext) -> OutboundMessage:
+    """Show or switch the active model."""
+    arg = ctx.args.strip() if ctx.args else ""
+    if not arg:
+        content = ctx.loop._format_model_list()
+    else:
+        content = ctx.loop._switch_model(arg)
+    return OutboundMessage(channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=content)
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     lines = [
         "nanobot commands:",
         "/new — Start a new conversation",
         "/clear — Clear conversation history",
+        "/compact — Compact conversation / switch compact model",
         "/skills — List available skills",
+        "/model — Show/switch model",
         "/mcp — List configured MCP servers",
         "/status — Show bot status",
         "/stop — Stop the current task",
@@ -145,3 +174,7 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/mcp", cmd_mcp)
     router.exact("/status", cmd_status)
     router.exact("/help", cmd_help)
+    router.prefix("/compact ", cmd_compact)
+    router.prefix("/model ", cmd_model)
+    router.exact("/compact", cmd_compact)
+    router.exact("/model", cmd_model)
