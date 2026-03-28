@@ -60,14 +60,10 @@ def __init__(self, ...,
 
 ---
 
-## 3. 进度消息抑制 (`nanobot/agent/loop.py`)
+## 3. 进度消息默认关闭 (`nanobot/config/schema.py`)
 
-`_bus_progress` 直接 `return`，不向任何 channel 发送进度消息。
-
-```python
-async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
-    return  # Suppress all progress messages to channels
-```
+`ChannelsConfig.send_progress` 默认值从上游的 `True` 改为 `False`。
+通过官方配置机制控制，可在 config.json 中按需开启。
 
 ---
 
