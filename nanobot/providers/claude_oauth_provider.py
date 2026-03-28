@@ -39,16 +39,22 @@ class ClaudeOAuthProvider(AnthropicProvider):
 
         # Load initial token
         self._load_token()
-        initial_headers = self._auth_headers()
 
-        # Init parent with a placeholder api_key (prevents env-var lookup)
-        # and our OAuth headers as default_headers.
+        # Init parent with a dummy api_key to satisfy AnthropicProvider.__init__
         super().__init__(
-            api_key="oauth-placeholder",
+            api_key="unused",
             api_base=api_base,
             default_model=default_model,
-            extra_headers=initial_headers,
         )
+
+        # Replace client: use auth_token (Bearer) instead of api_key (x-api-key).
+        # The Anthropic SDK natively supports auth_token for OAuth Bearer auth.
+        from anthropic import AsyncAnthropic
+
+        client_kw: dict[str, Any] = {"auth_token": self._token or "pending"}
+        if api_base:
+            client_kw["base_url"] = api_base
+        self._client = AsyncAnthropic(**client_kw)
 
     # ------------------------------------------------------------------
     # Token management
@@ -69,6 +75,8 @@ class ClaudeOAuthProvider(AnthropicProvider):
         """Refresh token if it's about to expire."""
         if self._expires_at is None or self._token is None:
             self._load_token()
+            if self._token and hasattr(self, "_client"):
+                self._client.auth_token = self._token
             return
 
         now_ms = int(time.time() * 1000)
@@ -82,15 +90,9 @@ class ClaudeOAuthProvider(AnthropicProvider):
 
         trigger_claude_token_refresh()
         self._load_token()
-
-    def _auth_headers(self) -> dict[str, str]:
-        """Build OAuth auth headers."""
-        headers: dict[str, str] = {
-            "anthropic-beta": self.BETA_HEADER,
-        }
+        # Update the client's auth_token so subsequent requests use the new token
         if self._token:
-            headers["authorization"] = f"Bearer {self._token}"
-        return headers
+            self._client.auth_token = self._token
 
     # ------------------------------------------------------------------
     # Message preprocessing (OAuth-specific)
@@ -154,9 +156,9 @@ class ClaudeOAuthProvider(AnthropicProvider):
             reasoning_effort, tool_choice, supports_caching,
         )
 
-        # Inject fresh OAuth headers (token may have been refreshed)
+        # Refresh token if needed (updates self._client.auth_token)
         self._refresh_token_if_needed()
-        kwargs["extra_headers"] = self._auth_headers()
+        kwargs["extra_headers"] = {"anthropic-beta": self.BETA_HEADER}
 
         return kwargs
 
