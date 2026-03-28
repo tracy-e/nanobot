@@ -34,7 +34,7 @@ class ProviderSpec:
     display_name: str = ""  # shown in `nanobot status`
 
     # which provider implementation to use
-    # "openai_compat" | "anthropic" | "azure_openai" | "openai_codex"
+    # "openai_compat" | "anthropic" | "azure_openai" | "openai_codex" | "claude_oauth"
     backend: str = "openai_compat"
 
     # extra env vars, e.g. (("ZHIPUAI_API_KEY", "{api_key}"),)
@@ -220,6 +220,15 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         display_name="Github Copilot",
         backend="openai_compat",
         default_api_base="https://api.githubcopilot.com",
+        is_oauth=True,
+    ),
+    # Claude OAuth: reuse Claude Code CLI OAuth token
+    ProviderSpec(
+        name="claude_oauth",
+        keywords=("claude-oauth",),
+        env_key="",
+        display_name="Claude OAuth",
+        backend="claude_oauth",
         is_oauth=True,
     ),
     # DeepSeek: OpenAI-compatible at api.deepseek.com

@@ -79,7 +79,31 @@ async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
 
 ---
 
-## 5. CLI 初始化 (`nanobot/cli/commands.py`)
+## 5. Claude OAuth Provider (本地独有)
+
+| 文件 | 说明 |
+|------|------|
+| `nanobot/providers/claude_oauth_provider.py` | 继承 AnthropicProvider，复用 Claude Code OAuth token |
+| `nanobot/providers/claude_oauth_auth.py` | macOS Keychain token 发现和刷新 |
+
+### 关键实现
+
+- 继承 `AnthropicProvider`，复用所有消息转换、prompt caching、streaming 逻辑
+- Override `_build_kwargs()` — 注入 OAuth Bearer token + beta headers + 消息预处理
+- Override `chat()` / `chat_stream()` — 401 → 刷新 token → 重试
+- `_fix_trailing_assistant()` — 尾部 assistant 消息转 user（OAuth 端点不支持 assistant prefill）
+- `_ensure_system_prefix()` — 确保 Claude Code system prefix 存在
+
+### 注册位置
+
+- `nanobot/providers/registry.py` — `ProviderSpec(name="claude_oauth", backend="claude_oauth", is_oauth=True)`
+- `nanobot/providers/__init__.py` — lazy-import 中包含 `ClaudeOAuthProvider`
+- `nanobot/config/schema.py` — `ProvidersConfig.claude_oauth`
+- `nanobot/cli/commands.py` — `_make_provider()` 中 `claude_oauth` 分支
+
+---
+
+## 6. CLI 初始化 (`nanobot/cli/commands.py`)
 
 ### `_make_provider(config, model=None)`
 
@@ -141,8 +165,11 @@ class SubagentConfig(Base):
 
 1. **builtin.py** — 接受上游基础命令，补回本地 /clear, /compact, /skills, /model, /mcp，更新 /help
 2. **loop.py** — 接受上游 runner/hook 架构，补回 init 参数 + helper 方法 + model 切换方法 + `_bus_progress` 抑制 + MemorySearchTool 注册
-3. **commands.py** — 接受上游重构，补回 `_make_provider` 的 model 参数、provider_factory 传递、state 恢复
-4. **schema.py** — 接受上游重构，补回 models / compact_model / SubagentConfig / memory_window (active)
-5. **memory_tool.py** — 本地独有文件，直接保留
-6. **tests/cli/test_commands.py** — `_make_provider` mock 加 `_model=None`；`_FakeAgentLoop` 加 `load_persisted_state`
-7. **tests/config/test_config_migration.py** — memory_window 断言保留 active
+3. **commands.py** — 接受上游重构，补回 `_make_provider` 的 model 参数、claude_oauth 分支、provider_factory 传递、state 恢复
+4. **schema.py** — 接受上游重构，补回 models / compact_model / SubagentConfig / memory_window (active) / claude_oauth
+5. **providers/registry.py** — 接受上游新 provider，补回 claude_oauth ProviderSpec
+6. **providers/__init__.py** — 接受上游 lazy-import，补回 ClaudeOAuthProvider
+7. **claude_oauth_*.py / memory_tool.py** — 本地独有文件，直接保留
+8. **tests/cli/test_commands.py** — `_make_provider` mock 加 `_model=None`；`_FakeAgentLoop` 加 `load_persisted_state`
+9. **tests/config/test_config_migration.py** — memory_window 断言保留 active
+10. **tests/providers/test_providers_init.py** — `__all__` 断言需包含 `ClaudeOAuthProvider`
