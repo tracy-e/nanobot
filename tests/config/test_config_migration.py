@@ -23,7 +23,9 @@ def test_load_config_keeps_max_tokens_and_ignores_legacy_memory_window(tmp_path)
 
     assert config.agents.defaults.max_tokens == 1234
     assert config.agents.defaults.context_window_tokens == 65_536
-    assert not hasattr(config.agents.defaults, "memory_window")
+    # memory_window is an active field in this fork (not deprecated)
+    assert config.agents.defaults.memory_window == 42
+    assert config.agents.defaults.should_warn_deprecated_memory_window is False
 
 
 def test_save_config_writes_context_window_tokens_but_not_memory_window(tmp_path) -> None:
@@ -49,7 +51,8 @@ def test_save_config_writes_context_window_tokens_but_not_memory_window(tmp_path
 
     assert defaults["maxTokens"] == 2222
     assert defaults["contextWindowTokens"] == 65_536
-    assert "memoryWindow" not in defaults
+    # memory_window is an active field in this fork, saved normally
+    assert defaults["memoryWindow"] == 30
 
 
 def test_onboard_does_not_crash_with_legacy_memory_window(tmp_path, monkeypatch) -> None:
