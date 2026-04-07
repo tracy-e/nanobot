@@ -932,8 +932,8 @@ class AgentLoop:
         self.runner.provider = self.provider
         self.subagents.provider = self.provider
         self.subagents.model = target
-        self.memory_consolidator.provider = self.provider
-        self.memory_consolidator.model = target
+        self.consolidator.provider = self.provider
+        self.consolidator.model = target
         self._persist_state()
         return f"Switched: {old_model} -> {target}"
 

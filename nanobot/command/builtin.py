@@ -346,7 +346,7 @@ async def cmd_compact(ctx: CommandContext) -> OutboundMessage:
     else:
         snapshot = session.messages[session.last_consolidated:]
         if snapshot:
-            loop._schedule_background(loop.memory_consolidator.archive_messages(snapshot))
+            loop._schedule_background(loop.consolidator.archive(snapshot))
         content = "Conversation compacted."
     return OutboundMessage(channel=ctx.msg.channel, chat_id=ctx.msg.chat_id, content=content)
 
