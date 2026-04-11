@@ -1,6 +1,7 @@
 Update memory files based on the analysis below.
 - [FILE] entries: add the described content to the appropriate file
 - [FILE-REMOVE] entries: delete the corresponding content from memory files
+- [SKILL-CANDIDATE] entries: append to memory/MEMORY.md under a "## Skill Candidates" section (one bullet per candidate). Skip if an existing skill already covers it.
 
 ## File paths (relative to workspace root)
 - SOUL.md

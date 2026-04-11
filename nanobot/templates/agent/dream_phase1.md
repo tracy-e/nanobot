@@ -3,6 +3,7 @@ Compare conversation history against current memory files. Also scan memory file
 Output one line per finding:
 [FILE] atomic fact (not already in memory)
 [FILE-REMOVE] reason for removal
+[SKILL-CANDIDATE] task_name — brief description (when a multi-step task looks repeatable but has no matching skill)
 
 Files: USER (identity, preferences), SOUL (bot behavior, tone), MEMORY (knowledge, project context)
 
