@@ -338,15 +338,30 @@ class DiscordChannel(BaseChannel):
         self._running = True
         logger.info("Starting Discord client via discord.py...")
 
-        try:
-            await self._client.start(self.config.token)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error("Discord client startup failed: {}", e)
-        finally:
-            self._running = False
-            await self._reset_runtime_state(close_client=True)
+        max_retries = 5
+        retry_delay = 5  # seconds
+        for attempt in range(1, max_retries + 1):
+            try:
+                await self._client.start(self.config.token)
+                break  # clean exit (e.g. stop() called)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        "Discord connect attempt {}/{} failed: {}. Retrying in {}s...",
+                        attempt, max_retries, e, retry_delay,
+                    )
+                    await self._reset_runtime_state(close_client=True)
+                    # re-create client for a fresh connection
+                    self._client = DiscordBotClient(self, intents=self._client.intents)
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
+                else:
+                    logger.error("Discord client startup failed after {} attempts: {}", max_retries, e)
+
+        self._running = False
+        await self._reset_runtime_state(close_client=True)
 
     async def stop(self) -> None:
         """Stop the Discord channel."""
