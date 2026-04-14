@@ -303,6 +303,41 @@ async def cmd_dream_restore(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_clear(ctx: CommandContext) -> OutboundMessage:
+    """Clear conversation history without archiving."""
+    loop = ctx.loop
+    session = ctx.session or loop.sessions.get_or_create(ctx.key)
+    msg_count = len(session.messages)
+    session.clear()
+    loop.sessions.save(session)
+    from loguru import logger
+
+    logger.info("Session cleared for {} (cleared {} messages)", ctx.key, msg_count)
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content="Conversation history cleared. Let's start fresh!",
+    )
+
+
+async def cmd_skills(ctx: CommandContext) -> OutboundMessage:
+    """List available workspace skills."""
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=ctx.loop._list_skills(),
+    )
+
+
+async def cmd_mcp(ctx: CommandContext) -> OutboundMessage:
+    """List configured MCP servers."""
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=ctx.loop._list_mcp_servers(),
+    )
+
+
 async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     """Return available slash commands."""
     return OutboundMessage(
@@ -318,9 +353,12 @@ def build_help_text() -> str:
     lines = [
         "🐈 nanobot commands:",
         "/new — Start a new conversation",
+        "/clear — Clear conversation history",
+        "/skills — List available skills",
+        "/mcp — List configured MCP servers",
+        "/status — Show bot status",
         "/stop — Stop the current task",
         "/restart — Restart the bot",
-        "/status — Show bot status",
         "/dream — Manually trigger Dream consolidation",
         "/dream-log — Show what the last Dream changed",
         "/dream-restore — Revert memory to a previous state",
@@ -335,6 +373,9 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.priority("/restart", cmd_restart)
     router.priority("/status", cmd_status)
     router.exact("/new", cmd_new)
+    router.exact("/clear", cmd_clear)
+    router.exact("/skills", cmd_skills)
+    router.exact("/mcp", cmd_mcp)
     router.exact("/status", cmd_status)
     router.exact("/dream", cmd_dream)
     router.exact("/dream-log", cmd_dream_log)

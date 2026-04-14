@@ -966,3 +966,63 @@ class AgentLoop:
             on_stream=on_stream,
             on_stream_end=on_stream_end,
         )
+
+    # -- /clear, /skills, /mcp helpers -----------------------------------------
+
+    def _list_skills(self) -> str:
+        """List available skills from workspace."""
+        skills_dir = self.workspace / "skills"
+        if not skills_dir.exists():
+            return "No skills directory found."
+        skills: list[str] = []
+        for skill_path in sorted(skills_dir.iterdir()):
+            if not skill_path.is_dir():
+                continue
+            skill_md = skill_path / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            skill_name = skill_path.name
+            description = ""
+            try:
+                content = skill_md.read_text(encoding="utf-8")
+                if content.startswith("---"):
+                    end = content.find("---", 3)
+                    if end != -1:
+                        for line in content[3:end].split("\n"):
+                            line = line.strip()
+                            if line.startswith("description:"):
+                                description = line[len("description:"):].strip().strip("\"'")
+                                break
+            except Exception:
+                pass
+            if len(description) > 80:
+                description = description[:77] + "..."
+            entry = f"  {skill_name}" + (f" - {description}" if description else "")
+            skills.append(entry)
+        if not skills:
+            return "No skills found."
+        return "Available skills:\n" + "\n".join(skills)
+
+    def _list_mcp_servers(self) -> str:
+        """List configured MCP servers and connection status."""
+        if not self._mcp_servers:
+            return "No MCP servers configured."
+        lines: list[str] = []
+        for name, cfg in self._mcp_servers.items():
+            if hasattr(cfg, "url") and cfg.url:
+                lines.append(f"  {name} — {cfg.url}")
+            elif hasattr(cfg, "command") and cfg.command:
+                args = " ".join(cfg.args) if hasattr(cfg, "args") and cfg.args else ""
+                lines.append(f"  {name} — {cfg.command} {args}".rstrip())
+            else:
+                url = cfg.get("url", "") if isinstance(cfg, dict) else ""
+                cmd = cfg.get("command", "") if isinstance(cfg, dict) else ""
+                if url:
+                    lines.append(f"  {name} — {url}")
+                elif cmd:
+                    args = " ".join(cfg.get("args", []))
+                    lines.append(f"  {name} — {cmd} {args}".rstrip())
+                else:
+                    lines.append(f"  {name}")
+        status = " (connected)" if self._mcp_connected else ""
+        return f"MCP servers{status}:\n" + "\n".join(lines)
