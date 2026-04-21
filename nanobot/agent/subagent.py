@@ -107,7 +107,7 @@ class SubagentManager:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
 
         status = SubagentStatus(
             task_id=task_id,
@@ -170,6 +170,7 @@ class SubagentManager:
                     restrict_to_workspace=self.restrict_to_workspace,
                     sandbox=self.exec_config.sandbox,
                     path_append=self.exec_config.path_append,
+                    allowed_env_keys=self.exec_config.allowed_env_keys,
                 ))
             if self.web_config.enable:
                 tools.register(WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy))
@@ -239,12 +240,22 @@ class SubagentManager:
             result=result,
         )
 
-        # Inject as system message to trigger main agent
+        # Inject as system message to trigger main agent.
+        # Use session_key_override to align with the main agent's effective
+        # session key (which accounts for unified sessions) so the result is
+        # routed to the correct pending queue (mid-turn injection) instead of
+        # being dispatched as a competing independent task.
+        override = origin.get("session_key") or f"{origin['channel']}:{origin['chat_id']}"
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
             content=announce_content,
+            session_key_override=override,
+            metadata={
+                "injected_event": "subagent_result",
+                "subagent_task_id": task_id,
+            },
         )
 
         await self.bus.publish_inbound(msg)
