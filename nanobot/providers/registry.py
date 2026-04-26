@@ -261,6 +261,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
         strip_model_prefix=True,
+        thinking_style="enable_thinking",
     ),
     # Moonshot (月之暗面): Kimi K2.5 / K2.6 enforce temperature >= 1.0.
     ProviderSpec(

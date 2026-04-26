@@ -135,29 +135,41 @@ if DISCORD_AVAILABLE:
             )
 
         def _register_app_commands(self) -> None:
-            commands = (
-                ("new", "Start a new conversation", "/new"),
-                ("stop", "Stop the current task", "/stop"),
-                ("restart", "Restart the bot", "/restart"),
-                ("status", "Show bot status", "/status"),
-            )
+            from nanobot.command.builtin import register_builtin_commands
+            from nanobot.command.router import CommandRouter
 
-            for name, description, command_text in commands:
+            router = CommandRouter()
+            register_builtin_commands(router)
 
-                @self.tree.command(name=name, description=description)
+            descriptions = {
+                "/new": "Start a new conversation",
+                "/stop": "Stop the current task",
+                "/restart": "Restart the bot",
+                "/status": "Show bot status",
+                "/clear": "Clear conversation context",
+                "/skills": "Show available skills",
+                "/mcp": "Show MCP servers status",
+                "/dream": "Show Dream memory status",
+                "/dream-log": "View Dream memory consolidation logs",
+                "/dream-restore": "Restore a previous memory snapshot",
+                "/help": "Show available commands",
+                "/compact": "Compact conversation context",
+                "/model": "Switch AI model at runtime",
+            }
+
+            for cmd_name in router.all_commands():
+                # Skip prefix commands (contain space) - Discord slash commands don't allow spaces
+                if " " in cmd_name:
+                    continue
+                desc = descriptions.get(cmd_name, f"Execute {cmd_name} command")
+                cmd_name_clean = cmd_name.strip("/").lower()
+
+                @self.tree.command(name=cmd_name_clean, description=desc)
                 async def command_handler(
                     interaction: discord.Interaction,
-                    _command_text: str = command_text,
+                    _cmd: str = cmd_name,
                 ) -> None:
-                    await self._forward_slash_command(interaction, _command_text)
-
-            @self.tree.command(name="help", description="Show available commands")
-            async def help_command(interaction: discord.Interaction) -> None:
-                sender_id = str(interaction.user.id)
-                if not self._channel.is_allowed(sender_id):
-                    await self._reply_ephemeral(interaction, "You are not allowed to use this bot.")
-                    return
-                await self._reply_ephemeral(interaction, build_help_text())
+                    await self._forward_slash_command(interaction, _cmd)
 
             @self.tree.error
             async def on_app_command_error(
