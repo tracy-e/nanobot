@@ -2,7 +2,7 @@
 
 > 本文档记录所有相对于上游 `HKUDS/nanobot` 的本地修改。
 > 合并上游更新时，以此文档为准恢复本地功能。
-> 最后更新：2026-04-21，基于 upstream `c1957e1`
+> 最后更新：2026-04-27，基于 upstream `ca66dd8`
 
 ---
 
@@ -79,7 +79,8 @@ def __init__(self, ...,
 
 ### `_make_provider(config, model=None)`
 
-本地版接受可选 `model` 参数，支持为不同模型创建不同 provider。
+本地版是 `nanobot/providers/factory.make_provider(config, model)` 的薄封装，
+负责把 ValueError 转成 typer.Exit 并保留可选 `model` 参数（上游 factory 也已扩展支持 model）。
 
 ### `gateway()` 和 `agent()` 命令
 
@@ -95,7 +96,18 @@ AgentLoop(
 )
 ```
 
-启动时从 `.state.json` 恢复 model/compact_model 选择。
+启动时从 `.state.json` 恢复 model/compact_model 选择，并把恢复的 model
+传给 `build_provider_snapshot(config, model)` 来构建初始 provider snapshot。
+
+### `nanobot/providers/factory.py` 扩展
+
+为支持本地 `/model` 切换，给上游 factory 加了可选 `model` 参数：
+
+- `make_provider(config, model: str | None = None)`
+- `provider_signature(config, model: str | None = None)`
+- `build_provider_snapshot(config, model: str | None = None)`
+
+未传 model 时行为与上游一致（取 `config.agents.defaults.model`）。
 
 ---
 
@@ -126,7 +138,10 @@ class SubagentConfig(Base):
 
 ## 7. 测试调整
 
-- `tests/cli/test_commands.py` — `_make_provider` mock 需要加 `_model=None` 参数；`_FakeAgentLoop` 需要 `load_persisted_state`
+- `tests/cli/test_commands.py` —
+  - `_make_provider` mock 需要 `_model=None` 参数
+  - `build_provider_snapshot` mock 也需要 `_model=None` 参数（因为本地扩展了它的签名）
+  - `_FakeAgentLoop` 需要 `load_persisted_state`
 - `tests/config/test_config_migration.py` — `memoryWindow` 断言保留 active（非 deprecated）
 
 ---
@@ -137,7 +152,7 @@ class SubagentConfig(Base):
 
 1. **builtin.py** — 接受上游基础命令，补回本地 /clear, /compact, /skills, /model, /mcp，更新 /help
 2. **loop.py** — 接受上游 runner/hook 架构，补回 init 参数 + helper 方法 + model 切换方法 + `_bus_progress` 抑制 + MemorySearchTool 注册
-3. **commands.py** — 接受上游重构，补回 `_make_provider` 的 model 参数、provider_factory 传递、state 恢复
+3. **commands.py** — 接受上游重构，让 `_make_provider` 转发到 `factory.make_provider(config, model)`；保留持久化 model 恢复并把 model 传给 `build_provider_snapshot`
 4. **schema.py** — 接受上游重构，补回 models / compact_model / SubagentConfig / memory_window (active)
 5. **memory_tool.py** — 本地独有文件，直接保留
 6. **tests/cli/test_commands.py** — `_make_provider` mock 加 `_model=None`；`_FakeAgentLoop` 加 `load_persisted_state`
