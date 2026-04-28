@@ -96,6 +96,15 @@ if DISCORD_AVAILABLE:
         async def on_message(self, message: discord.Message) -> None:
             await self._channel._handle_discord_message(message)
 
+        async def on_thread_delete(self, thread: discord.Thread) -> None:
+            self._channel._forget_channel(thread)
+
+        async def on_thread_update(self, before: discord.Thread, after: discord.Thread) -> None:
+            if getattr(after, "archived", False):
+                self._channel._forget_channel(after)
+            else:
+                self._channel._remember_channel(after)
+
         async def _reply_ephemeral(self, interaction: discord.Interaction, text: str) -> bool:
             """Send an ephemeral interaction response and report success."""
             try:
@@ -104,6 +113,37 @@ if DISCORD_AVAILABLE:
             except Exception as e:
                 logger.warning("Discord interaction response failed: {}", e)
                 return False
+
+        async def _resolve_interaction_channel(
+            self,
+            interaction: discord.Interaction,
+        ) -> Any | None:
+            channel_id = interaction.channel_id
+            if channel_id is None:
+                return None
+            channel = getattr(interaction, "channel", None) or self.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await self.fetch_channel(channel_id)
+                except Exception as e:
+                    logger.warning("Discord interaction channel {} unavailable: {}", channel_id, e)
+                    return None
+            self._channel._remember_channel(channel)
+            return channel
+
+        async def _interaction_channel_allowed(
+            self,
+            interaction: discord.Interaction,
+            channel: Any | None,
+        ) -> bool:
+            allow_channels = self._channel.config.allow_channels
+            if not allow_channels:
+                return True
+            if channel is None:
+                channel_id = interaction.channel_id
+                return channel_id is not None and str(channel_id) in allow_channels
+            channel_ids = self._channel._channel_allow_keys(channel)
+            return not channel_ids.isdisjoint(allow_channels)
 
         async def _forward_slash_command(
             self,
@@ -121,17 +161,33 @@ if DISCORD_AVAILABLE:
                 await self._reply_ephemeral(interaction, "You are not allowed to use this bot.")
                 return
 
+            channel = await self._resolve_interaction_channel(interaction)
+            if not await self._interaction_channel_allowed(interaction, channel):
+                await self._reply_ephemeral(interaction, "This channel is not allowed for this bot.")
+                return
+
             await self._reply_ephemeral(interaction, f"Processing {command_text}...")
+
+            metadata: dict[str, Any] = {
+                "interaction_id": str(interaction.id),
+                "guild_id": str(interaction.guild_id) if interaction.guild_id else None,
+                "is_slash_command": True,
+            }
+            session_key = None
+            if channel is not None:
+                parent_channel_id = self._channel._channel_parent_key(channel)
+                if parent_channel_id is not None:
+                    metadata["parent_channel_id"] = parent_channel_id
+                    metadata["context_chat_id"] = parent_channel_id
+                    metadata["thread_id"] = str(channel_id)
+                    session_key = f"{self._channel.name}:{parent_channel_id}:thread:{channel_id}"
 
             await self._channel._handle_message(
                 sender_id=sender_id,
                 chat_id=str(channel_id),
                 content=command_text,
-                metadata={
-                    "interaction_id": str(interaction.id),
-                    "guild_id": str(interaction.guild_id) if interaction.guild_id else None,
-                    "is_slash_command": True,
-                },
+                metadata=metadata,
+                session_key=session_key,
             )
 
         def _register_app_commands(self) -> None:
@@ -149,6 +205,7 @@ if DISCORD_AVAILABLE:
                 "/clear": "Clear conversation context",
                 "/skills": "Show available skills",
                 "/mcp": "Show MCP servers status",
+                "/history": "Show recent conversation messages",
                 "/dream": "Show Dream memory status",
                 "/dream-log": "View Dream memory consolidation logs",
                 "/dream-restore": "Restore a previous memory snapshot",
@@ -161,6 +218,9 @@ if DISCORD_AVAILABLE:
                 # Skip prefix commands (contain space) - Discord slash commands don't allow spaces
                 if " " in cmd_name:
                     continue
+                # /help is registered separately below with ephemeral reply
+                if cmd_name == "/help":
+                    continue
                 desc = descriptions.get(cmd_name, f"Execute {cmd_name} command")
                 cmd_name_clean = cmd_name.strip("/").lower()
 
@@ -170,6 +230,18 @@ if DISCORD_AVAILABLE:
                     _cmd: str = cmd_name,
                 ) -> None:
                     await self._forward_slash_command(interaction, _cmd)
+
+            @self.tree.command(name="help", description="Show available commands")
+            async def help_command(interaction: discord.Interaction) -> None:
+                sender_id = str(interaction.user.id)
+                if not self._channel.is_allowed(sender_id):
+                    await self._reply_ephemeral(interaction, "You are not allowed to use this bot.")
+                    return
+                channel = await self._resolve_interaction_channel(interaction)
+                if not await self._interaction_channel_allowed(interaction, channel):
+                    await self._reply_ephemeral(interaction, "This channel is not allowed for this bot.")
+                    return
+                await self._reply_ephemeral(interaction, build_help_text())
 
             @self.tree.error
             async def on_app_command_error(
@@ -189,7 +261,7 @@ if DISCORD_AVAILABLE:
             """Send a nanobot outbound message using Discord transport rules."""
             channel_id = int(msg.chat_id)
 
-            channel = self.get_channel(channel_id)
+            channel = self._channel._known_channels.get(msg.chat_id) or self.get_channel(channel_id)
             if channel is None:
                 try:
                     channel = await self.fetch_channel(channel_id)
@@ -295,6 +367,25 @@ class DiscordChannel(BaseChannel):
         channel_id = getattr(channel_or_id, "id", channel_or_id)
         return str(channel_id)
 
+    @classmethod
+    def _channel_allow_keys(cls, channel: Any) -> set[str]:
+        """Return channel IDs that can satisfy allow_channels for this channel."""
+        keys = {cls._channel_key(channel)}
+        if parent_key := cls._channel_parent_key(channel):
+            keys.add(parent_key)
+        return keys
+
+    @classmethod
+    def _channel_parent_key(cls, channel: Any) -> str | None:
+        """Return the parent channel key for a Discord thread-like channel."""
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id is not None:
+            return cls._channel_key(parent_id)
+        parent = getattr(channel, "parent", None)
+        if parent is not None:
+            return cls._channel_key(parent)
+        return None
+
     def __init__(self, config: Any, bus: MessageBus):
         if isinstance(config, dict):
             config = DiscordConfig.model_validate(config)
@@ -306,6 +397,13 @@ class DiscordChannel(BaseChannel):
         self._pending_reactions: dict[str, Any] = {}  # chat_id -> message object
         self._working_emoji_tasks: dict[str, asyncio.Task[None]] = {}
         self._stream_bufs: dict[str, _StreamBuf] = {}
+        self._known_channels: dict[str, Any] = {}
+
+    def _remember_channel(self, channel: Any) -> None:
+        self._known_channels[self._channel_key(channel)] = channel
+
+    def _forget_channel(self, channel_or_id: Any) -> None:
+        self._known_channels.pop(self._channel_key(channel_or_id), None)
 
     async def start(self) -> None:
         """Start the Discord client."""
@@ -461,11 +559,21 @@ class DiscordChannel(BaseChannel):
             raise
 
     async def _handle_discord_message(self, message: discord.Message) -> None:
-        """Handle incoming Discord messages from discord.py."""
-        # Bot message filtering (DISCORD_ALLOW_BOTS):
-        #   "none"     — ignore all other bots (default)
-        #   "mentions" — accept bot messages only when they @mention us
-        #   "all"      — accept all bot messages
+        """Handle incoming Discord messages from discord.py.
+
+        Self-loop guard (upstream #3217): drop messages from this bot's own account
+        and Discord system messages.
+
+        Then apply DISCORD_ALLOW_BOTS env filter (fork-local) to control how messages
+        from *other* bots are treated:
+          "none"     — ignore all other bots (default)
+          "mentions" — accept bot messages only when they @mention us
+          "all"      — accept all bot messages
+        """
+        if self._bot_user_id is not None and str(message.author.id) == self._bot_user_id:
+            return
+        if self._is_system_message(message):
+            return
         if getattr(message.author, "bot", False):
             allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
             if allow_bots == "none":
@@ -476,6 +584,7 @@ class DiscordChannel(BaseChannel):
 
         sender_id = str(message.author.id)
         channel_id = self._channel_key(message.channel)
+        self._remember_channel(message.channel)
         content = message.content or ""
 
         if not self._should_accept_inbound(message, sender_id, content):
@@ -484,6 +593,13 @@ class DiscordChannel(BaseChannel):
         media_paths, attachment_markers = await self._download_attachments(message.attachments)
         full_content = self._compose_inbound_content(content, attachment_markers)
         metadata = self._build_inbound_metadata(message)
+        parent_channel_id = self._channel_parent_key(message.channel)
+        session_key = None
+        if parent_channel_id is not None:
+            metadata["parent_channel_id"] = parent_channel_id
+            metadata["context_chat_id"] = parent_channel_id
+            metadata["thread_id"] = channel_id
+            session_key = f"{self.name}:{parent_channel_id}:thread:{channel_id}"
 
         await self._start_typing(message.channel)
 
@@ -511,6 +627,7 @@ class DiscordChannel(BaseChannel):
                 content=full_content,
                 media=media_paths,
                 metadata=metadata,
+                session_key=session_key,
             )
         except Exception:
             await self._clear_reactions(channel_id)
@@ -526,6 +643,9 @@ class DiscordChannel(BaseChannel):
         client = self._client
         if client is None or not client.is_ready():
             return None
+        channel = self._known_channels.get(chat_id)
+        if channel is not None:
+            return channel
         channel_id = int(chat_id)
         channel = client.get_channel(channel_id)
         if channel is not None:
@@ -574,8 +694,8 @@ class DiscordChannel(BaseChannel):
         # Channel-based filtering: only respond in allowed channels
         allow_channels = self.config.allow_channels
         if allow_channels:
-            channel_id = self._channel_key(message.channel)
-            if channel_id not in allow_channels:
+            channel_ids = self._channel_allow_keys(message.channel)
+            if channel_ids.isdisjoint(allow_channels):
                 return False
         if message.guild is not None and not self._should_respond_in_group(message, content):
             return False
@@ -616,6 +736,12 @@ class DiscordChannel(BaseChannel):
         return "\n".join(part for part in content_parts if part) or "[empty message]"
 
     @staticmethod
+    def _is_system_message(message: discord.Message) -> bool:
+        """Return True for Discord system messages that carry no user prompt."""
+        message_type = getattr(message, "type", discord.MessageType.default)
+        return message_type not in {discord.MessageType.default, discord.MessageType.reply}
+
+    @staticmethod
     def _build_inbound_metadata(message: discord.Message) -> dict[str, str | None]:
         """Build metadata for inbound Discord messages."""
         reply_to = (
@@ -636,6 +762,8 @@ class DiscordChannel(BaseChannel):
 
         if self.config.group_policy == "mention":
             bot_user_id = self._bot_user_id
+            if bot_user_id is None and self._client and self._client.user:
+                bot_user_id = str(self._client.user.id)
             if bot_user_id is None:
                 logger.debug(
                     "Discord message in {} ignored (bot identity unavailable)", message.channel.id
@@ -644,13 +772,29 @@ class DiscordChannel(BaseChannel):
 
             if any(str(user.id) == bot_user_id for user in message.mentions):
                 return True
+            if bot_user_id in {str(user_id) for user_id in getattr(message, "raw_mentions", [])}:
+                return True
             if f"<@{bot_user_id}>" in content or f"<@!{bot_user_id}>" in content:
+                return True
+            if self._references_bot_message(message, bot_user_id):
                 return True
 
             logger.debug("Discord message in {} ignored (bot not mentioned)", message.channel.id)
             return False
 
         return True
+
+    @staticmethod
+    def _references_bot_message(message: discord.Message, bot_user_id: str) -> bool:
+        """Return True when a Discord reply targets a message authored by this bot."""
+        reference = getattr(message, "reference", None)
+        if reference is None:
+            return False
+        referenced_message = getattr(reference, "resolved", None) or getattr(
+            reference, "cached_message", None
+        )
+        author = getattr(referenced_message, "author", None)
+        return str(getattr(author, "id", "")) == bot_user_id
 
     async def _start_typing(self, channel: Messageable) -> None:
         """Start periodic typing indicator for a channel."""
@@ -708,6 +852,7 @@ class DiscordChannel(BaseChannel):
         """Reset client and typing state."""
         await self._cancel_all_typing()
         self._stream_bufs.clear()
+        self._known_channels.clear()
         if close_client and self._client is not None and not self._client.is_closed():
             try:
                 await self._client.close()
