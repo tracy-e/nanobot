@@ -2,7 +2,7 @@
 
 > 本文档记录所有相对于上游 `HKUDS/nanobot` 的本地修改。
 > 合并上游更新时，以此文档为准恢复本地功能。
-> 最后更新：2026-04-27，基于 upstream `ca66dd8`
+> 最后更新：2026-04-28，基于 upstream `97981b9`
 
 ---
 
@@ -136,7 +136,31 @@ class SubagentConfig(Base):
 
 ---
 
-## 7. 测试调整
+## 7. Discord 频道扩展 (`nanobot/channels/discord.py`)
+
+### 动态 slash command 注册
+
+上游用静态 `commands` 元组注册 `/new /stop /restart /status /history`。
+本地改为通过 `CommandRouter` + `register_builtin_commands` 动态注册全部命令
+（含 `/clear /skills /mcp /compact /model /dream*` 等），便于一处维护。
+
+`/help` 仍单独注册（保留上游的 ephemeral 回复体验），循环内通过
+`if cmd_name == "/help": continue` 跳过避免重复。
+
+### `DISCORD_ALLOW_BOTS` 环境变量
+
+上游 #3217 改成只过滤自己（`_bot_user_id`）+ 系统消息（`_is_system_message`），
+其它 bot 默认放行。本地保留 fork 自定义的 `DISCORD_ALLOW_BOTS` 三档过滤：
+
+- `none`（默认）— 忽略所有其它 bot 消息
+- `mentions` — 只接收 @ 提到自己时的 bot 消息
+- `all` — 接收所有 bot 消息
+
+合并顺序：先按上游做自循环 + 系统消息排除，再按本地 env 过滤其它 bot。
+
+---
+
+## 8. 测试调整
 
 - `tests/cli/test_commands.py` —
   - `_make_provider` mock 需要 `_model=None` 参数
@@ -150,10 +174,11 @@ class SubagentConfig(Base):
 
 合并上游时，对于冲突文件：
 
-1. **builtin.py** — 接受上游基础命令，补回本地 /clear, /compact, /skills, /model, /mcp，更新 /help
+1. **builtin.py** — 接受上游基础命令（含 `/history`），补回本地 /clear, /compact, /skills, /model, /mcp，更新 /help（注意去重 /status）
 2. **loop.py** — 接受上游 runner/hook 架构，补回 init 参数 + helper 方法 + model 切换方法 + `_bus_progress` 抑制 + MemorySearchTool 注册
 3. **commands.py** — 接受上游重构，让 `_make_provider` 转发到 `factory.make_provider(config, model)`；保留持久化 model 恢复并把 model 传给 `build_provider_snapshot`
 4. **schema.py** — 接受上游重构，补回 models / compact_model / SubagentConfig / memory_window (active)
 5. **memory_tool.py** — 本地独有文件，直接保留
-6. **tests/cli/test_commands.py** — `_make_provider` mock 加 `_model=None`；`_FakeAgentLoop` 加 `load_persisted_state`
-7. **tests/config/test_config_migration.py** — memory_window 断言保留 active
+6. **discord.py** — 保留本地动态 router 注册逻辑（在循环内 `continue` 跳过 `/help`，再单独保留上游 ephemeral `/help`）；保留 `DISCORD_ALLOW_BOTS` 三档过滤，置于上游 `_bot_user_id` 自循环 + `_is_system_message` 检查之后
+7. **tests/cli/test_commands.py** — `_make_provider` mock 加 `_model=None`；`build_provider_snapshot` mock 加 `_model=None`；`_FakeAgentLoop` 加 `load_persisted_state`
+8. **tests/config/test_config_migration.py** — memory_window 断言保留 active
