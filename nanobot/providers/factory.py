@@ -73,6 +73,7 @@ def make_provider(config: Config, model: str | None = None) -> LLMProvider:
             default_model=model,
             extra_headers=p.extra_headers if p else None,
             spec=spec,
+            extra_body=p.extra_body if p else None,
         )
 
     defaults = config.agents.defaults
