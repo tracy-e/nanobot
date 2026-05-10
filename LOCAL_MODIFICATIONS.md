@@ -2,13 +2,14 @@
 
 > 本文档记录所有相对于上游 `HKUDS/nanobot` 的本地修改。
 > 合并上游更新时，以此文档为准恢复本地功能。
-> 最后更新：2026-05-05，基于 upstream `9d6afd86`
+> 最后更新：2026-05-10，基于 upstream `73a8d8a8`
 
 ---
 
 ## 1. 斜杠命令扩展 (`nanobot/command/builtin.py`)
 
 上游内置命令（/new, /stop, /restart, /status, /help）保持不变。
+上游引入了 `BUILTIN_COMMAND_SPECS` 元组 + `BuiltinCommandSpec` dataclass，`build_help_text()` 与 `builtin_command_palette()` 都基于它生成。**新增本地命令时必须同时在 `BUILTIN_COMMAND_SPECS` 中加 spec**，否则不会出现在 /help 与命令面板里。
 
 ### 本地新增命令
 
@@ -20,7 +21,7 @@
 | `/model [number\|name]` | 显示/切换当前模型 | `cmd_model` → `loop._switch_model()` |
 | `/mcp` | 列出 MCP 服务器及连接状态 | `cmd_mcp` → `loop._list_mcp_servers()` |
 
-`/help` 已更新包含所有本地命令。
+以上 5 个命令都已加入 `BUILTIN_COMMAND_SPECS`，并在 `register_builtin_commands` 中注册路由。
 
 ---
 
@@ -84,11 +85,13 @@ def __init__(self, ...,
 
 ### `gateway()` 和 `agent()` 命令
 
-传递给 `AgentLoop` 的额外参数：
+上游已统一走 `AgentLoop.from_config(config, bus, **extra)`。本地两个 CLI 入口都通过 extra kwargs 传入额外参数：
 
 ```python
-AgentLoop(
-    ...,
+AgentLoop.from_config(
+    config, bus,
+    provider=provider, model=model,         # 来自 .state.json 恢复 + _make_provider(config, model)
+    cron_service=cron,
     compact_model=compact_model,
     provider_factory=lambda m: _make_provider(config, m),
     available_models=config.agents.defaults.models,
@@ -96,8 +99,10 @@ AgentLoop(
 )
 ```
 
-启动时从 `.state.json` 恢复 model/compact_model 选择，并把恢复的 model
-传给 `build_provider_snapshot(config, model)` 来构建初始 provider snapshot。
+启动时从 `.state.json` 恢复 model/compact_model 选择；`gateway()` 把恢复的 model
+传给 `build_provider_snapshot(config, model)` 来构建初始 provider snapshot，`agent()` 直接调
+`_make_provider(config, model)` 拿 provider 再喂给 `from_config`（避免 `from_config` 内
+部走默认路径无视恢复的 model）。
 
 ### `nanobot/providers/factory.py` 扩展
 
@@ -166,6 +171,7 @@ class SubagentConfig(Base):
   - `_make_provider` mock 需要 `_model=None` 参数
   - `build_provider_snapshot` mock 也需要 `_model=None` 参数（因为本地扩展了它的签名）
   - `_FakeAgentLoop` 需要 `load_persisted_state`
+  - 同时保留上游新增的 `nanobot.providers.factory.make_provider` mock（`from_config` 内部默认路径会用到）
 - `tests/config/test_config_migration.py` — `memoryWindow` 断言保留 active（非 deprecated）
 
 ---
@@ -174,9 +180,9 @@ class SubagentConfig(Base):
 
 合并上游时，对于冲突文件：
 
-1. **builtin.py** — 接受上游基础命令（含 `/history`），补回本地 /clear, /compact, /skills, /model, /mcp，更新 /help（注意去重 /status）
-2. **loop.py** — 接受上游 runner/hook 架构，补回 init 参数 + helper 方法 + model 切换方法 + `_bus_progress` 抑制 + MemorySearchTool 注册
-3. **commands.py** — 接受上游重构，让 `_make_provider` 转发到 `factory.make_provider(config, model)`；保留持久化 model 恢复并把 model 传给 `build_provider_snapshot`
+1. **builtin.py** — 接受上游 `BUILTIN_COMMAND_SPECS` 自动生成 help/palette 的机制；把本地 /clear, /compact, /skills, /model, /mcp 加进 specs 元组（按出现顺序），并保留 `register_builtin_commands` 中的路由注册
+2. **loop.py** — 接受上游 runner/hook + `from_config` classmethod 架构，补回 init 参数 + helper 方法 + model 切换方法 + `_bus_progress` 抑制 + MemorySearchTool 注册
+3. **commands.py** — 接受上游重构（`AgentLoop.from_config`），让 `_make_provider` 转发到 `factory.make_provider(config, model)`；`agent()` / `gateway()` 都用 `from_config` + extra kwargs 传 `compact_model / provider_factory / available_models / data_dir`；保留持久化 model 恢复，gateway 把 model 传给 `build_provider_snapshot`，agent 直接 `_make_provider(config, model)` 后把 provider 传给 from_config
 4. **schema.py** — 接受上游重构，补回 models / compact_model / SubagentConfig / memory_window (active)
 5. **memory_tool.py** — 本地独有文件，直接保留
 6. **discord.py** — 保留本地动态 router 注册逻辑（在循环内 `continue` 跳过 `/help`，再单独保留上游 ephemeral `/help`）；保留 `DISCORD_ALLOW_BOTS` 三档过滤，置于上游 `_bot_user_id` 自循环 + `_is_system_message` 检查之后

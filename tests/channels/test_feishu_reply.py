@@ -346,6 +346,89 @@ async def test_send_fallback_to_create_when_reply_fails() -> None:
     channel._client.im.v1.message.create.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_send_multiple_messages_all_use_reply_when_in_topic(tmp_path: Path) -> None:
+    """When in a topic (has thread_id), all messages use reply API to stay in topic."""
+    channel = _make_feishu_channel(reply_to_message=False)
+
+    file1 = tmp_path / "file1.png"
+    file2 = tmp_path / "file2.png"
+    file1.write_bytes(b"demo1")
+    file2.write_bytes(b"demo2")
+
+    reply_calls = []
+    create_calls = []
+
+    def _mock_reply(*args, **kwargs) -> bool:
+        reply_calls.append((args, kwargs))
+        return True
+
+    def _mock_create(*args, **kwargs) -> str:
+        create_calls.append((args, kwargs))
+        return "msg_id"
+
+    with patch.object(channel, "_upload_file_sync", return_value="file-key"), \
+         patch.object(channel, "_upload_image_sync", return_value="image-key"), \
+         patch.object(channel, "_reply_message_sync", side_effect=_mock_reply), \
+         patch.object(channel, "_send_message_sync", side_effect=_mock_create):
+        await channel.send(OutboundMessage(
+            channel="feishu",
+            chat_id="oc_abc",
+            content="hello",
+            media=[str(file1), str(file2)],
+            metadata={
+                "message_id": "om_001",
+                "thread_id": "om_thread",
+                "chat_type": "group",
+            },
+        ))
+
+    # All 3 sends (text + 2 images) should use reply
+    assert len(reply_calls) == 3
+    assert len(create_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_send_multiple_messages_only_first_uses_reply_when_reply_to_message(tmp_path: Path) -> None:
+    """When reply_to_message is enabled but not in topic, only first message uses reply."""
+    channel = _make_feishu_channel(reply_to_message=True)
+
+    file1 = tmp_path / "file1.png"
+    file2 = tmp_path / "file2.png"
+    file1.write_bytes(b"demo1")
+    file2.write_bytes(b"demo2")
+
+    reply_calls = []
+    create_calls = []
+
+    def _mock_reply(*args, **kwargs) -> bool:
+        reply_calls.append((args, kwargs))
+        return True
+
+    def _mock_create(*args, **kwargs) -> str:
+        create_calls.append((args, kwargs))
+        return "msg_id"
+
+    with patch.object(channel, "_upload_file_sync", return_value="file-key"), \
+         patch.object(channel, "_upload_image_sync", return_value="image-key"), \
+         patch.object(channel, "_reply_message_sync", side_effect=_mock_reply), \
+         patch.object(channel, "_send_message_sync", side_effect=_mock_create):
+        await channel.send(OutboundMessage(
+            channel="feishu",
+            chat_id="oc_abc",
+            content="hello",
+            media=[str(file1), str(file2)],
+            metadata={
+                "message_id": "om_001",
+                "chat_type": "group",
+            },
+        ))
+
+    # Only first send uses reply, rest use create
+    assert len(reply_calls) == 1
+    assert len(create_calls) == 2
+
+
 # ---------------------------------------------------------------------------
 # _on_message — parent_id / root_id metadata tests
 # ---------------------------------------------------------------------------
@@ -443,6 +526,58 @@ async def test_on_message_no_extra_api_call_when_no_parent_id() -> None:
 
     channel._client.im.v1.message.get.assert_not_called()
     assert len(captured) == 1
+
+
+# ---------------------------------------------------------------------------
+# Inbound media tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_message_audio_publishes_downloaded_path_and_transcription() -> None:
+    channel = _make_feishu_channel()
+    channel._processed_message_ids.clear()
+    captured = []
+
+    async def capture(msg):
+        captured.append(msg)
+
+    channel.bus.publish_inbound = capture
+    channel._download_and_save_media = AsyncMock(
+        return_value=(r"C:\\Users\\dodre\\.nanobot\\media\\feishu\\voice.ogg", "[audio: voice.ogg]")
+    )
+    channel.transcribe_audio = AsyncMock(return_value="hello from voice")
+    channel._add_reaction = AsyncMock(return_value=None)
+
+    event = _make_feishu_event(
+        msg_type="audio",
+        content='{"file_key": "audio_key", "duration": 1000}',
+        message_id="om_audio",
+    )
+    await channel._on_message(event)
+
+    channel._download_and_save_media.assert_awaited_once_with(
+        "audio", {"file_key": "audio_key", "duration": 1000}, "om_audio"
+    )
+    channel.transcribe_audio.assert_awaited_once_with(r"C:\\Users\\dodre\\.nanobot\\media\\feishu\\voice.ogg")
+    assert len(captured) == 1
+    assert captured[0].media == [r"C:\\Users\\dodre\\.nanobot\\media\\feishu\\voice.ogg"]
+    assert captured[0].content == "[transcription: hello from voice]"
+
+
+@pytest.mark.asyncio
+async def test_download_and_save_media_returns_absolute_path_in_content(monkeypatch, tmp_path) -> None:
+    channel = _make_feishu_channel()
+    monkeypatch.setattr(feishu, "get_media_dir", lambda _channel: tmp_path)
+    channel._download_file_sync = MagicMock(return_value=(b"voice-bytes", None))
+
+    file_path, content_text = await channel._download_and_save_media(
+        "audio", {"file_key": "voice_key"}, "om_audio"
+    )
+
+    assert file_path == str(tmp_path / "voice_key.ogg")
+    assert (tmp_path / "voice_key.ogg").read_bytes() == b"voice-bytes"
+    assert content_text == f"[audio: {file_path}]"
 
 
 # ---------------------------------------------------------------------------
@@ -754,3 +889,26 @@ def test_on_background_task_done_removes_from_set() -> None:
         loop.close()
 
     assert task not in channel._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_on_message_ignores_unauthorized_sender_before_side_effects() -> None:
+    channel = _make_feishu_channel(group_policy="open")
+    channel.config.allow_from = ["ou_allowed"]
+    channel._add_reaction = AsyncMock()
+    channel._download_and_save_media = AsyncMock(return_value=("/tmp/audio.ogg", "[audio]"))
+    channel.transcribe_audio = AsyncMock(return_value="transcript")
+    channel._handle_message = AsyncMock()
+
+    event = _make_feishu_event(
+        msg_type="audio",
+        content='{"file_key": "file_1"}',
+        sender_open_id="ou_blocked",
+    )
+
+    await channel._on_message(event)
+
+    channel._add_reaction.assert_not_awaited()
+    channel._download_and_save_media.assert_not_awaited()
+    channel.transcribe_audio.assert_not_awaited()
+    channel._handle_message.assert_not_awaited()
