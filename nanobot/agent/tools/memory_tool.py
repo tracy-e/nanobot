@@ -80,6 +80,10 @@ class MemorySearchTool(Tool):
         self.workspace = workspace
         self.memory_dir = workspace / "memory"
 
+    @classmethod
+    def create(cls, ctx) -> "MemorySearchTool":
+        return cls(workspace=Path(ctx.workspace))
+
     @property
     def name(self) -> str:
         return "memory_search"
